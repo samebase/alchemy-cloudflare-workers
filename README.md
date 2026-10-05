@@ -14,7 +14,7 @@ The package adds only what the built-in `alchemy/Cloudflare` provider does not h
 
 This is a community provider, maintained by [Samebase](https://samebase.com).
 
-Status: 0.2, pinned to `alchemy@2.0.0-beta.80` and Effect 4. Alchemy ships breaking changes
+Status: 0.3, pinned to `alchemy@2.0.0-beta.80` and Effect 4. Alchemy ships breaking changes
 between betas. Upgrade this package and Alchemy together.
 
 ## Ownership rule
@@ -82,12 +82,13 @@ export default Alchemy.Stack(
     state: Cloudflare.state(),
   },
   Effect.gen(function* () {
-    // The name must match `name` in the repository's wrangler.jsonc.
-    const worker = yield* WorkersBuilds.Worker("Worker", { name: "my-app" });
+    // Without `name`, Alchemy makes one, such as `myapp-worker-dev-k3m7x2ab`.
+    const worker = yield* WorkersBuilds.Worker("Worker");
 
+    // Without `repository`, the repository of this clone or GitHub Actions
+    // run, built from its default branch.
     const builds = yield* WorkersBuilds.Repository("Builds", {
       worker: worker.workerId,
-      repository: { owner: "my-org", name: "my-app", branch: "main" },
       buildCommand: "pnpm install && pnpm run build",
       variables: { CONVEX_DEPLOY_KEY: Config.Redacted("CONVEX_DEPLOY_KEY") },
       previewVariables: { CONVEX_DEPLOY_KEY: Config.Redacted("CONVEX_PREVIEW_DEPLOY_KEY") },
@@ -105,8 +106,54 @@ export default Alchemy.Stack(
 );
 ```
 
-Alchemy creates the Worker first, because the configuration and the secret use its outputs. The
-Worker has no version until Workers Builds builds the next push to `main`.
+The run file names no Worker, repository, or id, so it works unchanged in each fork of the
+repository. Alchemy creates the Worker first, because the configuration and the secret use its
+outputs. The Worker has no version until Workers Builds builds the next push to the production
+branch.
+
+### Without `repository`
+
+`WorkersBuilds.Repository` then uses the repository of the run, in this order:
+
+1. In GitHub Actions, `GITHUB_REPOSITORY`, through Alchemy's `GitHubEnv` from `alchemy/GitHub`.
+2. Else the `origin` remote of the current directory (`git remote get-url origin`), in the form
+   `https://github.com/<owner>/<name>` or `git@github.com:<owner>/<name>`, with or without `.git`.
+
+When neither gives a GitHub repository, the deploy fails with `WorkersBuildsError`. The provider
+then reads the GitHub ids and, without `repository.branch`, the default branch from one call to
+`GET https://api.github.com/repos/{owner}/{name}`. For a private repository, set `GITHUB_TOKEN`. In
+GitHub Actions, pass `GITHUB_TOKEN: ${{ github.token }}` in `env`.
+
+The plan does not see a change of the current repository. A deploy that reconciles the
+configuration fails with `WorkersBuildsError` when the configuration builds from another
+repository.
+
+`WorkersBuilds.currentRepository` is the same resolver, for names in the run file. It yields
+`{ owner, name, defaultBranch, ownerId, repositoryId }`. A run file can fail only with
+`ConfigError`, so pipe it through `Effect.orDie`:
+
+```ts
+Effect.gen(function* () {
+  const repository = yield* WorkersBuilds.currentRepository.pipe(Effect.orDie);
+  const worker = yield* WorkersBuilds.Worker("Worker", { name: repository.name });
+  // ...
+});
+```
+
+### Without `name`
+
+`WorkersBuilds.Worker` then makes the name with Alchemy's `createPhysicalName`, as other Alchemy
+resources do: the stack name, the logical id, the stage, and 8 characters of the resource's
+instance id, lowercase and at most 54 characters, such as `myapp-worker-dev-k3m7x2ab`.
+
+- The name is made once, on create, and stays in state. Later deploys use the stored name. A
+  replacement, such as another account, makes a new name.
+- An explicit `name` that differs from the stored name replaces the Worker. Removing `name` keeps
+  the Worker and its name.
+- On Wrangler 3 and later, Workers Builds deploys to the connected Worker
+  [whatever `name` the Wrangler file has](https://developers.cloudflare.com/workers/ci-cd/builds/troubleshoot/).
+- The name is also the `workers.dev` hostname: `https://<name>.<account subdomain>.workers.dev`.
+  A production Worker usually wants an explicit name.
 
 ## Resources
 
@@ -115,15 +162,15 @@ Worker has no version until Workers Builds builds the next push to `main`.
 Calls `POST`, `GET`, `PATCH`, and `DELETE /accounts/{account_id}/workers/workers[/{worker_id}]`
 and `GET /accounts/{account_id}/workers/subdomain`.
 
-| Prop            | Default                                    | Change  |
-| --------------- | ------------------------------------------ | ------- |
-| `name`          | required                                   | replace |
-| `subdomain`     | `{ enabled: true, previewsEnabled: true }` | update  |
-| `observability` | persisted invocation logs, no traces       | update  |
-| `logpush`       | `false`                                    | update  |
-| `tags`          | `[]`                                       | update  |
-| `tailConsumers` | `[]`                                       | update  |
-| `delete`        | `false`                                    | update  |
+| Prop            | Default                                              | Change  |
+| --------------- | ---------------------------------------------------- | ------- |
+| `name`          | made by Alchemy, see [Without `name`](#without-name) | replace |
+| `subdomain`     | `{ enabled: true, previewsEnabled: true }`           | update  |
+| `observability` | persisted invocation logs, no traces                 | update  |
+| `logpush`       | `false`                                              | update  |
+| `tags`          | `[]`                                                 | update  |
+| `tailConsumers` | `[]`                                                 | update  |
+| `delete`        | `false`                                              | update  |
 
 Outputs: `workerId` (the Worker tag), `name`, `url`
 (`https://<name>.<account subdomain>.workers.dev`), `accountId`.
@@ -131,8 +178,9 @@ Outputs: `workerId` (the Worker tag), `name`, `url`
 - Defaults apply on create only. An update sends only the props that you set.
 - Destroy keeps the Worker unless `delete` is `true`. Deleting a Worker deletes all of its
   versions, deployments, and preview URLs.
-- A new `name` creates a new Worker. The old Worker stays unless `delete` is `true`.
-- An existing Worker with the same name is adopted only with `--adopt`.
+- A new explicit `name` creates a new Worker. The old Worker stays unless `delete` is `true`.
+- An existing Worker with the same name is adopted only with `--adopt`. A made name is new, so
+  nothing is adopted without `name`.
 
 ### `WorkersBuilds.Repository`
 
@@ -141,29 +189,34 @@ Calls `GET`, `POST`, `PATCH`, and `DELETE /accounts/{account_id}/builds/workers[
 `GET .../builds/workers/{script_tag}/triggers`, `DELETE .../builds/triggers/{trigger_uuid}`, and
 `GET https://api.github.com/repos/{owner}/{name}`.
 
-| Prop                                  | Default                | Change                      |
-| ------------------------------------- | ---------------------- | --------------------------- |
-| `worker`                              | required               | replace                     |
-| `repository.owner`, `.name`           | required               | replace                     |
-| `repository.branch`                   | required               | update                      |
-| `repository.ownerId`, `.repositoryId` | read from GitHub       | replace when the id changes |
-| `buildCommand`                        | required               | update                      |
-| `deployCommand`                       | `npx wrangler deploy`  | update                      |
-| `previewDeployCommand`                | `npx wrangler preview` | update                      |
-| `rootDirectory`                       | `/`                    | update                      |
-| `pathIncludes`                        | `["*"]`                | update                      |
-| `pathExcludes`                        | `[]`                   | update                      |
-| `buildCachingEnabled`                 | `true`                 | update                      |
-| `buildToken`                          | see below              | update                      |
-| `previews`                            | `true`                 | update                      |
-| `variables`                           | none                   | update                      |
-| `previewVariables`                    | none                   | update                      |
+| Prop                                  | Default                   | Change                                          |
+| ------------------------------------- | ------------------------- | ----------------------------------------------- |
+| `worker`                              | required                  | replace                                         |
+| `repository`                          | the repository of the run | see [Without `repository`](#without-repository) |
+| `repository.owner`, `.name`           | required in `repository`  | replace, see Renames below                      |
+| `repository.branch`                   | default branch on GitHub  | update                                          |
+| `repository.ownerId`, `.repositoryId` | read from GitHub          | replace when the id changes                     |
+| `buildCommand`                        | required                  | update                                          |
+| `deployCommand`                       | `npx wrangler deploy`     | update                                          |
+| `previewDeployCommand`                | `npx wrangler preview`    | update                                          |
+| `rootDirectory`                       | `/`                       | update                                          |
+| `pathIncludes`                        | `["*"]`                   | update                                          |
+| `pathExcludes`                        | `[]`                      | update                                          |
+| `buildCachingEnabled`                 | `true`                    | update                                          |
+| `buildToken`                          | see below                 | update                                          |
+| `previews`                            | `true`                    | update                                          |
+| `variables`                           | none                      | update                                          |
+| `previewVariables`                    | none                      | update                                          |
 
 Outputs: `scriptTag`, `repoConnectionId`, `triggerIds`, `previewsEnabled`, `accountId`.
 
-- GitHub ids: Workers Builds addresses a repository by its numeric GitHub ids. Without `ownerId`
-  and `repositoryId`, the provider reads them from the GitHub API with `GITHUB_TOKEN` or
-  `GITHUB_ACCESS_TOKEN`, or without a token for a public repository.
+- GitHub ids: Workers Builds addresses a repository by its numeric GitHub ids. Without `ownerId`,
+  `repositoryId`, and `branch`, the provider reads them from the GitHub API with `GITHUB_TOKEN` or
+  `GITHUB_ACCESS_TOKEN`, or without a token for a public repository. It reads them on each deploy
+  that reconciles the configuration.
+- Renames: GitHub keeps the repository id when a repository gets a new name or owner. With
+  `repositoryId` in the old and the new props, only the ids count, so a renamed repository is an
+  update, not a replacement. Without the ids, another owner or name replaces the configuration.
 - Build token: Workers Builds deploys with the API token behind a build token. Without
   `buildToken`, a new configuration uses the account's first build token (by name, newest first),
   and an existing configuration keeps its token. If the account has no build token, connect any
@@ -178,8 +231,9 @@ Outputs: `scriptTag`, `repoConnectionId`, `triggerIds`, `previewsEnabled`, `acco
 - Destroy removes the build triggers and the build configuration. It keeps the Worker and the
   repository connection, because every Worker that builds from the same repository shares that
   connection.
-- An existing configuration for the Worker is adopted only with `--adopt`, and only when it builds
-  from the same repository.
+- An existing configuration for the Worker is adopted only with `--adopt`. Each deploy that
+  reconciles the configuration checks that it builds from the repository, by id. If it builds from
+  another repository, the deploy fails with `WorkersBuildsError`.
 
 ### `WorkersBuilds.Secret`
 
