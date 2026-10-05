@@ -39,7 +39,7 @@ it with 400 and with 404. Replace each file with a recording when the secret liv
 | -------------------------------------- | -------------------------------------------------------------------------------- | --------------------------------------- |
 | `workers_scripts_secrets_list.json`    | GET /accounts/{account_id}/workers/scripts/{script_name}/secrets                 | OpenAPI `worker-list-script-secrets`    |
 | `workers_scripts_secrets_put.json`     | PUT /accounts/{account_id}/workers/scripts/{script_name}/secrets                 | OpenAPI `worker-put-script-secret`      |
-| `workers_scripts_not_found_error.json` | /accounts/{account_id}/workers/scripts/{script_name}/..., Worker does not exist | code 10007, Samebase test message       |
+| `workers_scripts_not_found_error.json` | /accounts/{account_id}/workers/scripts/{script_name}/... and DELETE /accounts/{account_id}/workers/workers/{worker_id}, Worker does not exist | code 10007, Samebase test message       |
 | `user_tokens_verify.json`              | GET /user/tokens/verify                                                          | OpenAPI `user-api-tokens-verify-token`  |
 | `builds_tokens_create.json`            | POST /accounts/{account_id}/builds/tokens                                        | OpenAPI `createBuildToken`              |
 

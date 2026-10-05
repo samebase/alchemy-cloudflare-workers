@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0
+
+Breaking change: destroy deletes a `WorkersBuilds.Worker`, as it deletes Alchemy's own
+`Cloudflare.Worker`. To keep a Worker on destroy, use Alchemy's removal policy.
+
+- `WorkersBuilds.Worker`: the `delete` prop is removed. Destroy and replacement delete the Worker
+  with all of its versions and preview URLs through
+  `DELETE /accounts/{account_id}/workers/workers/{worker_id}`. A Worker that is already gone is not
+  an error. Before, destroy only removed the Worker from state unless `delete` was `true`.
+- The resource keeps Alchemy's default removal policy, `destroy`. Alchemy retains by default only
+  resources that it cannot make again, such as `Cloudflare.Zone`. The Wrangler file and the next
+  build make a Worker again.
+- State from 0.3 holds `delete` in the saved props. The first deploy after the upgrade plans an
+  update of the Worker. That update sends no PATCH.
+
+Migration:
+
+- `delete: true`: remove the prop. Destroy deletes the Worker, as it did.
+- `delete: false`, or no `delete` (the old default): remove the prop. When the Worker must stay after
+  destroy, wrap the call:
+  `yield* WorkersBuilds.Worker("Worker", { name }).pipe(Alchemy.RemovalPolicy.retain())`. This also
+  applies to an adopted Worker. The policy is not a prop, so the plan shows no change. Deploy once
+  after you add it. A destroy before that deploy deletes the Worker.
+
 ## 0.3.1
 
 Renamed to `@samebase/alchemy-cloudflare-workers-builds`. The old name, `@samebase/alchemy-cloudflare-workers`,

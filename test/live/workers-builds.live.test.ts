@@ -68,7 +68,7 @@ test.provider.skipIf(!liveEnabled)(
       const secret = Redacted.make(randomBytes(16).toString("hex"));
       const declare = (greeting: string) =>
         Effect.gen(function* () {
-          const worker = yield* WorkersBuilds.Worker("Worker", { name, delete: true });
+          const worker = yield* WorkersBuilds.Worker("Worker", { name });
           const builds = yield* WorkersBuilds.Repository("Builds", {
             worker: worker.workerId,
             repository: {

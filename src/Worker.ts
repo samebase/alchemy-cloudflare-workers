@@ -44,13 +44,6 @@ export interface WorkerProps {
   readonly tags?: readonly string[];
   /** Workers that receive this Worker's logs. @default [] */
   readonly tailConsumers?: readonly { readonly name: string }[];
-  /**
-   * Delete the Worker on destroy or replacement. Deleting a Worker deletes
-   * every deployed version and all of its preview URLs. When this is not
-   * `true`, destroy only removes the Worker from Alchemy state.
-   * @default false
-   */
-  readonly delete?: boolean;
 }
 
 export interface WorkerAttributes {
@@ -78,7 +71,13 @@ export interface WorkerAttributes {
  * names a setting, leave that setting out of this resource; then the two
  * never fight.
  *
- * Destroy keeps the Worker unless `delete` is `true`.
+ * Destroy deletes the Worker with all of its versions and preview URLs. A
+ * replacement deletes the old Worker after it creates the new one. A stack
+ * that must keep a production Worker on destroy wraps the call:
+ * `yield* WorkersBuilds.Worker("Worker", { name }).pipe(Alchemy.RemovalPolicy.retain())`.
+ * Alchemy then removes the Worker from state and does not delete it. This
+ * also applies to an adopted Worker, because Alchemy destroys adopted and
+ * created resources in the same way.
  */
 export type Worker = Resource<
   "WorkersBuilds.Worker",
@@ -246,16 +245,17 @@ export const WorkerProvider = () =>
       return yield* attributesOf(accountId, existing);
     }),
 
-    delete: Effect.fn(function* ({ olds, output }) {
-      if (!propsOrEmpty(olds).delete) return;
-      yield* workers
-        .deleteBetaWorker({ accountId: output.accountId, workerId: output.workerId })
-        .pipe(
-          Effect.catchTag("WorkerNotFound", () => Effect.void),
-          refused("delete Worker"),
-        );
+    delete: Effect.fn(function* ({ output }) {
+      yield* deleteWorker(output);
     }),
   });
+
+/** Deletes the Worker with all of its versions and preview URLs. A missing Worker is not an error. */
+export const deleteWorker = (worker: WorkerAttributes) =>
+  workers.deleteBetaWorker({ accountId: worker.accountId, workerId: worker.workerId }).pipe(
+    Effect.catchTag("WorkerNotFound", () => Effect.void),
+    refused("delete Worker"),
+  );
 
 const findWorker = (accountId: string, workerId: string) =>
   workers.getBetaWorker({ accountId, workerId }).pipe(
