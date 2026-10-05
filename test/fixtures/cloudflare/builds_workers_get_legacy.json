@@ -1,0 +1,70 @@
+{
+  "script_tag": "3717c592bb564236a6815df01f084963",
+  "git_repository": {
+    "repo_id": "1358278395",
+    "repo_name": "tmp-plugin-review-9806-20260905-1434",
+    "provider_type": "github",
+    "provider_account_id": "315958746",
+    "provider_account_name": "samebase-live-tests",
+    "grant_id": null,
+    "branch": "main"
+  },
+  "production_settings": {
+    "build_command": "pnpm run build",
+    "deploy_command": "pnpm run deploy",
+    "root_directory": "/",
+    "build_caching_enabled": false,
+    "path_includes": [
+      "*"
+    ],
+    "path_excludes": [],
+    "build_token_uuid": "bf34959e-03df-446a-af6d-b55bff91ab8b",
+    "environment_variables": {
+      "CONVEX_DEPLOY_KEY": {
+        "is_secret": true,
+        "created_on": "2026-09-05T14:35:42.071Z",
+        "value": null
+      },
+      "PREVIEW_CONVEX_DEPLOY_KEY": {
+        "is_secret": true,
+        "created_on": "2026-09-05T14:35:42.071Z",
+        "value": null
+      },
+      "SAMEBASE_CONVEX_PROJECT": {
+        "is_secret": false,
+        "created_on": "2026-09-05T14:35:42.071Z",
+        "value": "version=1&teamId=522530&projectId=2939992"
+      }
+    }
+  },
+  "previews_enabled": false,
+  "previews_base_config": {
+    "build_command": "pnpm run build",
+    "deploy_command": "pnpm run deploy:preview",
+    "root_directory": "/",
+    "build_caching_enabled": false,
+    "path_includes": [
+      "*"
+    ],
+    "path_excludes": [],
+    "build_token_uuid": "bf34959e-03df-446a-af6d-b55bff91ab8b",
+    "environment_variables": {
+      "CONVEX_DEPLOY_KEY": {
+        "is_secret": true,
+        "created_on": "2026-09-05T14:35:42.042Z",
+        "value": null
+      },
+      "PREVIEW_CONVEX_DEPLOY_KEY": {
+        "is_secret": true,
+        "created_on": "2026-09-05T14:35:42.042Z",
+        "value": null
+      },
+      "SAMEBASE_CONVEX_PROJECT": {
+        "is_secret": false,
+        "created_on": "2026-09-05T14:35:42.042Z",
+        "value": "version=1&teamId=522530&projectId=2939992"
+      }
+    },
+    "proposed_deploy_command": null
+  }
+}

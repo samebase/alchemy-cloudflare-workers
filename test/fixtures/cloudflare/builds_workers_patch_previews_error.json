@@ -1,0 +1,11 @@
+{
+  "success": false,
+  "messages": [],
+  "errors": [
+    {
+      "code": 12048,
+      "message": "Cannot enable preview settings while a non-production trigger exists. Use the migrate_to_previews endpoint instead."
+    }
+  ],
+  "result": null
+}

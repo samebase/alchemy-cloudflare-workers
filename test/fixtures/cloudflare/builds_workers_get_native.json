@@ -1,0 +1,54 @@
+{
+  "script_tag": "eaeec9c35fa64976a823c246164f4204",
+  "git_repository": {
+    "repo_id": "1397342994",
+    "repo_name": "tmp-native-preview-template-native-previews",
+    "provider_type": "github",
+    "provider_account_id": "315958746",
+    "provider_account_name": "samebase-live-tests",
+    "grant_id": null,
+    "branch": "main"
+  },
+  "production_settings": {
+    "build_command": "pnpm run build",
+    "deploy_command": "pnpm run deploy",
+    "root_directory": "/",
+    "build_caching_enabled": true,
+    "path_includes": [
+      "*"
+    ],
+    "path_excludes": [],
+    "build_token_uuid": "37ba157d-9fb1-4cf9-8382-4d9fe7d69816",
+    "environment_variables": {
+      "CONVEX_DEPLOY_KEY": {
+        "is_secret": true,
+        "created_on": "2026-09-30T08:15:08.207Z",
+        "value": null
+      },
+      "SAMEBASE_CONVEX_PROJECT": {
+        "is_secret": false,
+        "created_on": "2026-09-30T08:15:08.207Z",
+        "value": "version=1&teamId=522530&projectId=3108337"
+      }
+    }
+  },
+  "previews_enabled": true,
+  "previews_base_config": {
+    "build_command": "pnpm run build",
+    "deploy_command": "pnpm run deploy:preview",
+    "root_directory": "/",
+    "build_caching_enabled": true,
+    "path_includes": [
+      "*"
+    ],
+    "path_excludes": [],
+    "build_token_uuid": "37ba157d-9fb1-4cf9-8382-4d9fe7d69816",
+    "environment_variables": {
+      "CONVEX_DEPLOY_KEY": {
+        "is_secret": true,
+        "created_on": "2026-09-30T08:15:08.207Z",
+        "value": null
+      }
+    }
+  }
+}

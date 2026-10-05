@@ -1,0 +1,11 @@
+{
+  "success": false,
+  "messages": [],
+  "errors": [
+    {
+      "code": 12040,
+      "message": "No build configuration associated with that script tag was found for this account"
+    }
+  ],
+  "result": null
+}

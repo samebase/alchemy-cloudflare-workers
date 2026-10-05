@@ -1,0 +1,11 @@
+{
+  "success": false,
+  "errors": [
+    {
+      "code": 10016,
+      "message": "Invalid Worker name. Ensure the name is lowercase, alphanumeric, and contains no spaces or special characters except dashes."
+    }
+  ],
+  "messages": [],
+  "result": null
+}

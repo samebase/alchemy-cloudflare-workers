@@ -1,0 +1,11 @@
+{
+  "success": false,
+  "errors": [
+    {
+      "code": 100315,
+      "message": "Script name is too long to be used with previews enabled. Script names with previews enabled cannot be longer than 54 characters."
+    }
+  ],
+  "messages": [],
+  "result": null
+}

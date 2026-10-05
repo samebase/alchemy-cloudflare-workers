@@ -1,23 +1,23 @@
 {
-  "name": "@samebase/alchemy-workers-builds",
+  "name": "@samebase/alchemy-cloudflare-workers",
   "version": "0.0.0",
   "description": "Alchemy v2 resources for Cloudflare Workers Builds: a Worker whose code Workers Builds deploys, the repository connection, the triggers, and the build variables.",
   "keywords": [
     "alchemy",
     "cloudflare",
-    "workers",
-    "workers-builds",
+    "effect",
     "infrastructure-as-code",
-    "effect"
+    "workers",
+    "workers-builds"
   ],
-  "homepage": "https://github.com/samebase/alchemy-workers-builds#readme",
+  "homepage": "https://github.com/samebase/alchemy-cloudflare-workers#readme",
   "bugs": {
-    "url": "https://github.com/samebase/alchemy-workers-builds/issues"
+    "url": "https://github.com/samebase/alchemy-cloudflare-workers/issues"
   },
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/samebase/alchemy-workers-builds.git"
+    "url": "git+https://github.com/samebase/alchemy-cloudflare-workers.git"
   },
   "files": [
     "lib",
@@ -40,11 +40,14 @@
     "check": "vp fmt --check && vp lint && pnpm run typecheck && vp test --run",
     "typecheck": "tsc --noEmit",
     "test": "vp test --run",
-    "test:live": "ALCHEMY_CONVEX_LIVE=1 vp test --run test/live",
+    "test:live": "ALCHEMY_WORKERS_BUILDS_LIVE=1 vp test --run test/live",
     "format": "vp fmt",
     "lint": "vp lint",
     "build": "rm -rf lib && tsc -p tsconfig.build.json",
     "prepack": "pnpm run build"
+  },
+  "dependencies": {
+    "@distilled.cloud/cloudflare": "1.0.0-rc.13"
   },
   "devDependencies": {
     "@effect/platform-node": "4.0.0",

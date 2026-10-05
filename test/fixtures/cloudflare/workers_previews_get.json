@@ -1,0 +1,32 @@
+{
+  "id": "f985667b85d9443291f31a1849028790",
+  "slug": "nicu-preview-smoke",
+  "name": "nicu-preview-smoke",
+  "tags": [],
+  "observability": {
+    "enabled": false,
+    "head_sampling_rate": 1,
+    "redact_query_string": false,
+    "logs": {
+      "enabled": false,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true,
+      "destinations": []
+    },
+    "traces": {
+      "enabled": false,
+      "head_sampling_rate": 1,
+      "persist": true,
+      "destinations": []
+    }
+  },
+  "logpush": false,
+  "tail_consumers": [],
+  "urls": [
+    "https://nicu-preview-smoke-tmp-native-preview-template-native-previews.rir.workers.dev"
+  ],
+  "created_on": "2026-09-30T08:32:45.762865Z",
+  "updated_on": "2026-09-30T08:32:45.762865Z",
+  "deployed_on": "2026-09-30T08:53:15.214187Z"
+}
