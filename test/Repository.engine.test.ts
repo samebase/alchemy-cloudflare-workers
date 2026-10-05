@@ -4,6 +4,7 @@
 import * as RemovalPolicy from "alchemy/RemovalPolicy";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vitest";
 import * as WorkersBuilds from "../src/index.ts";
 import {
@@ -80,7 +81,9 @@ describe("a renamed repository", () => {
 
     expect(second.scriptTag).toBe(first.scriptTag);
     expect(second.triggerIds).toEqual(first.triggerIds);
+    // The plan reads the configuration, then the apply reads, patches, and reads it again.
     expect(api.requests.filter((request) => !request.includes("api.github.com"))).toEqual([
+      `GET /builds/workers/${scriptTag}`,
       `GET /builds/workers/${scriptTag}`,
       `PATCH /builds/workers/${scriptTag}`,
       `GET /builds/workers/${scriptTag}`,
@@ -103,6 +106,7 @@ describe("another repository for the same Worker", () => {
     const second = await deploy.deploy(stack(byName(other)));
 
     expect(api.requests.filter((request) => !request.includes("api.github.com"))).toEqual([
+      `GET /builds/workers/${scriptTag}`,
       `GET /builds/workers/${scriptTag}`,
       `GET /builds/workers/${scriptTag}/triggers`,
       `DELETE /builds/triggers/${first.triggerIds[0]}`,
@@ -252,6 +256,82 @@ describe("a failed create after the old configuration was deleted", () => {
     const configuration = api.configurations.get(scriptTag);
     expect(configuration?.git_repository.repo_id).toBe(String(other.id));
     expect(configuration?.production_settings.build_token_uuid).toBe(saved.build_token_uuid);
+  });
+});
+
+describe("a configuration that is gone", () => {
+  it("is created again by the next deploy after a repair deleted it and failed to create it", async () => {
+    const api = github();
+    const deploy = engine(api);
+    const program = stack(byName(recorded));
+    await deploy.deploy(program);
+    // The dashboard connects the Worker to another repository.
+    const current = api.configurations.get(scriptTag);
+    if (current === undefined) throw new Error("no configuration");
+    api.configurations.set(scriptTag, {
+      ...current,
+      git_repository: {
+        ...current.git_repository,
+        repo_id: String(other.id),
+        repo_name: other.name,
+      },
+    });
+
+    api.failures.add("POST /builds/workers");
+    const repair = await deploy.repair().then(
+      () => undefined,
+      (failure: unknown) => String(failure),
+    );
+    expect(repair).toBeDefined();
+    expect(api.configurations.has(scriptTag)).toBe(false);
+
+    expect((await deploy.plan(program)).resources["Builds"]?.action).toBe("update");
+    await deploy.deploy(program);
+    const configuration = api.configurations.get(scriptTag);
+    expect(configuration?.git_repository.repo_id).toBe(String(recorded.id));
+    expect(configuration?.production_settings.build_token_uuid).toBe(buildToken);
+  });
+});
+
+describe("state from 0.4", () => {
+  /** The attributes as 0.4 saved them: no repository and no settings. */
+  const before05 = Schema.decodeUnknownSync(
+    Schema.Struct({
+      scriptTag: Schema.String,
+      repoConnectionId: Schema.optionalKey(Schema.String),
+      triggerIds: Schema.Array(Schema.String),
+      previewsEnabled: Schema.Boolean,
+      accountId: Schema.String,
+    }),
+  );
+
+  it("moves to another repository only with buildToken, because it has no saved token", async () => {
+    const api = github();
+    api.buildTokens.push(registeredBuildToken());
+    const deploy = engine(api);
+    const unpinned = (repository: WorkersBuilds.GitHubRepository, token?: string) =>
+      Effect.gen(function* () {
+        const builds = yield* WorkersBuilds.Repository("Builds", {
+          worker: scriptTag,
+          repository,
+          buildCommand: "pnpm run build",
+          ...(token === undefined ? {} : { buildToken: token }),
+        });
+        return { scriptTag: builds.scriptTag };
+      });
+    await deploy.deploy(unpinned(byName(recorded)));
+    await deploy.editAttributes("Builds", before05);
+    const before = api.configurations.get(scriptTag);
+
+    const failed = await deploy.deploy(unpinned(byName(other))).then(
+      () => undefined,
+      (failure: unknown) => String(failure),
+    );
+    expect(failed).toContain("pass buildToken");
+    expect(api.configurations.get(scriptTag)).toEqual(before);
+
+    await deploy.deploy(unpinned(byName(other), registeredBuildToken().build_token_uuid));
+    expect(api.configurations.get(scriptTag)?.git_repository.repo_id).toBe(String(other.id));
   });
 });
 

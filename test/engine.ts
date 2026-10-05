@@ -566,6 +566,21 @@ export const engine = (api: FakeApi, remote: { origin: string } = { origin: "" }
           Effect.provide(services),
         ),
       ),
+    /** Changes the saved attributes of a resource, such as to the shape that 0.4 saved. */
+    editAttributes: (fqn: string, change: (attributes: unknown) => Record<string, unknown>) =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* yield* State.State;
+          const saved = yield* store.get({ stack: STACK, stage: STAGE, fqn });
+          if (!State.isResourceState(saved)) return;
+          yield* store.set({
+            stack: STACK,
+            stage: STAGE,
+            fqn,
+            value: { ...saved, attr: change(saved.attr) },
+          });
+        }).pipe(Effect.provide(state)),
+      ),
     /** The saved attributes of a resource. */
     attributes: (fqn: string) =>
       Effect.runPromise(

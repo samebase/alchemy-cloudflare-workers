@@ -267,8 +267,13 @@ production branch), and `production` and `preview` (the build settings). See
 - Another repository: another repository id is also an update. The deploy deletes the build
   triggers and the configuration, and then creates the configuration for the new repository, in
   that order. The new configuration keeps the build token. Variables that someone else added are
-  gone. If the create fails, the next deploy creates the configuration. Only an explicit
-  `repository` prop moves the builds to another repository.
+  gone. If the create fails, the next deploy creates the configuration with the saved build token.
+  Only an explicit `repository` prop moves the builds to another repository. State from 0.4 has no
+  saved build token, so the first move after the upgrade needs `buildToken`, or one deploy without
+  the move first.
+- A configuration that is gone: the plan reads the configuration of the Worker. When it is gone,
+  such as after someone deleted it or after a failed create, the plan shows an update, and the
+  deploy creates it again.
 - Another Worker: another `worker` or account replaces the resource. That is another
   configuration, so Alchemy creates it and then deletes the old one. `Alchemy.RemovalPolicy.retain()`
   keeps the old one. When the same deploy replaces the `WorkersBuilds.Worker`, the plan does not

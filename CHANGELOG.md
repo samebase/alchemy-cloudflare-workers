@@ -17,6 +17,9 @@ settings that the resources own.
   saved build token, also when a deploy retries a failed create.
 - `WorkersBuilds.Repository`: another `worker` or account is still a replacement, as in 0.4. That
   is another configuration, so the order is safe, and `RemovalPolicy.retain()` keeps the old one.
+- `WorkersBuilds.Repository`: the plan reads the configuration of the Worker. When it is gone, such
+  as after a failed create or a delete in the dashboard, the plan shows an update, and the deploy
+  creates it again. Before, the plan showed no change until a drift check.
 - `WorkersBuilds.Repository`: only an explicit `repository` prop moves the builds to another
   repository. When the repository of the run differs from the configuration, the plan shows an
   update, and the deploy fails with `WorkersBuildsError`, as before.
@@ -38,7 +41,12 @@ Upgrade:
   each `WorkersBuilds.Worker` that declares a setting. The update saves the new outputs. It
   writes the same settings again.
 - A plan now reads GitHub for each `WorkersBuilds.Repository` without `ownerId`, `repositoryId`,
-  and `branch`. For a private repository, set `GITHUB_TOKEN` where you run `alchemy plan`.
+  and `branch`. For a private repository, set `GITHUB_TOKEN` where you run `alchemy plan`. The plan
+  also reads the Workers Builds configuration, so the token for `alchemy plan` needs Workers Builds
+  access.
+- State from 0.4 has no saved build token. If the first deploy after the upgrade also moves to
+  another repository, pass `buildToken`, or deploy once without the move first. Else the deploy
+  fails with `WorkersBuildsError` and changes nothing.
 
 ## 0.4.0
 

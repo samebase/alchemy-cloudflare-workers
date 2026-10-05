@@ -429,8 +429,8 @@ const settingsDiffer = (
  * and `output.repository` is the repository that the configuration builds
  * from. Only the repository id counts: GitHub keeps it when a repository
  * gets a new name or owner, and Workers Builds keeps the old names. Another
- * id or branch, changed props, or saved settings that differ from the props
- * are an update. State from 0.4 has no repository and no settings in its
+ * id or branch, changed props, saved settings that differ from the props, or
+ * a configuration that is gone are an update. State from 0.4 has no repository and no settings in its
  * attributes, so the first plan after the upgrade is an update, which saves
  * them.
  *
@@ -443,6 +443,8 @@ export const diffRepository = (input: {
   readonly output: RepositoryAttributes | RepositoryAttributesBefore05;
   readonly accountId: string;
   readonly target: Required<GitHubRepository>;
+  /** Whether Workers Builds still has the configuration. */
+  readonly exists: boolean;
 }): UpdateDiff | ReplaceDiff | undefined => {
   const { olds, news, output, target } = input;
   if (output.scriptTag !== news.worker || output.accountId !== input.accountId) {
@@ -451,6 +453,7 @@ export const diffRepository = (input: {
   const saved = "repository" in output ? output : undefined;
   const sameRepository = saved?.repository.repositoryId === target.repositoryId;
   const changed =
+    !input.exists ||
     saved === undefined ||
     !sameRepository ||
     saved.repository.branch !== target.branch ||
@@ -524,12 +527,18 @@ export const RepositoryProvider = () =>
       // unresolved tag is never a replacement: it can resolve to the same
       // Worker, such as a Worker that a renamed logical id adopts.
       if (!isResolved(news) || output === undefined) return undefined;
+      const accountId = yield* currentAccountId;
+      const same = output.scriptTag === news.worker && output.accountId === accountId;
       return diffRepository({
         olds,
         news,
         output,
-        accountId: yield* currentAccountId,
+        accountId,
         target: yield* resolveRepositoryOnce(news.repository),
+        // A configuration that is gone, such as after a repair that deleted
+        // it and then failed to create it, means no automatic builds. The
+        // plan reads it, so the next deploy creates it again.
+        exists: same ? (yield* getBuilds(accountId, output.scriptTag)) !== undefined : true,
       });
     }),
 
@@ -582,12 +591,22 @@ export const RepositoryProvider = () =>
             message: `Worker ${scriptTag} builds from ${from}, not ${to}, the repository of this run. To move the builds to ${to}, pass repository. Else run the deploy from a clone of ${from}.`,
           });
         }
+        // A retry after a failed create below must find the build token in
+        // the saved attributes. State from 0.4 has none, so it must not
+        // delete the configuration that holds the token.
+        if (news.buildToken === undefined && !("production" in own)) {
+          return yield* new WorkersBuildsError({
+            operation: "check Workers Builds repository",
+            message: `Worker ${scriptTag} builds from ${from}, and the state, saved by 0.4, has no build token. To move the builds to ${to}, pass buildToken, or deploy once without the move first.`,
+          });
+        }
         // Another repository for the same Worker. Workers Builds keeps one
         // configuration per Worker, and its PATCH changes only the branch
         // of the repository. So this reconcile deletes the old triggers and
         // the old configuration first, and then creates the configuration
         // for the new repository below, in that order. If the create fails,
-        // the next deploy finds no configuration and creates it.
+        // the next plan finds no configuration, and the deploy creates it
+        // with the saved build token.
         yield* deleteConfiguration(accountId, scriptTag);
         builds = undefined;
       }
