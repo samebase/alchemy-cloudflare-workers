@@ -444,9 +444,9 @@ const STAGE = "test";
 
 /**
  * One stack with its own in-memory state over `api`. `deploy` plans and
- * applies a stack program, `plan` only plans it, and `drift` runs Alchemy's
- * drift check (as `alchemy drift` and `alchemy deploy --detect-drift` do) on
- * the saved state. `remote.origin` is the `origin` remote that git prints;
+ * applies a stack program, and `plan` only plans it. `drift` runs Alchemy's
+ * drift check on the saved state, as `alchemy drift` and
+ * `alchemy deploy --detect-drift` do, and `repair` runs the repair. `remote.origin` is the `origin` remote that git prints;
  * a test can change it between deploys.
  */
 export const engine = (api: FakeApi, remote: { origin: string } = { origin: "" }) => {
@@ -513,6 +513,15 @@ export const engine = (api: FakeApi, remote: { origin: string } = { origin: "" }
     drift: () =>
       Effect.runPromise(
         Drift.plan({ name: STACK, stage: STAGE }).pipe(
+          Effect.provide(stored),
+          provideFreshArtifactStore,
+          Effect.provide(services),
+        ),
+      ),
+    /** The repair that `alchemy deploy --detect-drift` runs after approval. */
+    repair: () =>
+      Effect.runPromise(
+        Drift.repair({ name: STACK, stage: STAGE }).pipe(
           Effect.provide(stored),
           provideFreshArtifactStore,
           Effect.provide(services),

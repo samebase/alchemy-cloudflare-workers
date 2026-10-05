@@ -168,7 +168,42 @@ describe("diffWorker", () => {
     ).toEqual({ action: "replace" });
   });
 
-  it("leaves settings changes to the engine, which updates through PATCH", () => {
+  it("is no change when each declared setting matches the saved one", () => {
+    const saved: WorkerAttributes = {
+      ...output,
+      logpush: true,
+      subdomain: { enabled: true, previewsEnabled: false },
+      // Cloudflare reports every observability field.
+      observability: {
+        enabled: true,
+        headSamplingRate: 1,
+        redactQueryString: false,
+        logs: { destinations: [], enabled: true, headSamplingRate: 1, invocationLogs: true },
+        traces: { enabled: false, propagationPolicy: null },
+      },
+      tags: ["a", "b"],
+      tailConsumers: [{ name: "log-sink" }],
+    };
+    const news: WorkerProps = {
+      name: "my-app",
+      logpush: true,
+      subdomain: { enabled: true, previewsEnabled: false },
+      observability: { enabled: true, logs: { invocationLogs: true } },
+      tags: ["b", "a"],
+      tailConsumers: [{ name: "log-sink" }],
+    };
+    expect(diffWorker({ oldName: "my-app", news, output: saved, accountId })).toBeUndefined();
+    expect(
+      diffWorker({
+        oldName: "my-app",
+        news: { ...news, observability: { enabled: true, logs: { invocationLogs: false } } },
+        output: saved,
+        accountId,
+      }),
+    ).toEqual({ action: "update" });
+  });
+
+  it("updates a declared setting that the saved attributes lack, as in state from 0.4", () => {
     expect(
       diffWorker({
         oldName: "my-app",
@@ -176,7 +211,7 @@ describe("diffWorker", () => {
         output,
         accountId,
       }),
-    ).toBeUndefined();
+    ).toEqual({ action: "update" });
   });
 });
 

@@ -4,6 +4,7 @@
 export { PermissionError, TOKEN_PERMISSIONS, WorkersBuildsError } from "./Api.ts";
 export { Providers, providers } from "./Providers.ts";
 export {
+  type BuildSettings,
   type BuildVariables,
   type CurrentRepository,
   currentRepository,
@@ -13,4 +14,4 @@ export {
   type RepositoryProps,
 } from "./Repository.ts";
 export { Secret, type SecretAttributes, type SecretProps } from "./Secret.ts";
-export { Worker, type WorkerAttributes, type WorkerProps } from "./Worker.ts";
+export { Worker, type WorkerAttributes, type WorkerProps, type WorkerSettings } from "./Worker.ts";

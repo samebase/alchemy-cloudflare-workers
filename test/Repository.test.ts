@@ -193,13 +193,26 @@ describe("updateBody", () => {
 });
 
 describe("diffRepository", () => {
+  /** The settings that `props` ask for, as Workers Builds reports them. */
+  const settings = {
+    buildCommand: "pnpm run build",
+    deployCommand: "npx wrangler deploy",
+    rootDirectory: "/",
+    pathIncludes: ["*"],
+    pathExcludes: [],
+    buildCachingEnabled: true,
+    buildToken: legacy.production_settings.build_token_uuid,
+    variables: {},
+  };
   const output: RepositoryAttributes = {
     scriptTag: legacy.script_tag,
     repoConnectionId: undefined,
     triggerIds: [],
-    previewsEnabled: false,
+    previewsEnabled: true,
     accountId,
     repository: resolved,
+    production: settings,
+    preview: { ...settings, deployCommand: "npx wrangler preview" },
   };
   const diff = (news: RepositoryProps, target = resolved) =>
     diffRepository({ olds: props, news, output, accountId, target });
@@ -272,8 +285,55 @@ describe("diffRepository", () => {
     expect(diff(news, { ...resolved, branch: "release" })).toEqual(keepsAll);
   });
 
-  it("updates state from 0.4, which has no repository in its attributes, to save it", () => {
-    const { repository: _, ...before } = output;
+  it("updates when the saved settings differ from the props", () => {
+    const changed = [
+      { ...output, production: { ...settings, buildCommand: "npm run build" } },
+      { ...output, preview: { ...output.preview, pathIncludes: ["src/*"] } },
+      { ...output, previewsEnabled: false },
+    ];
+    for (const saved of changed) {
+      expect(
+        diffRepository({ olds: props, news: props, output: saved, accountId, target: resolved }),
+      ).toEqual(keepsAll);
+    }
+  });
+
+  it("compares the variables that the props name, by kind, and the token only when named", () => {
+    const news: RepositoryProps = {
+      ...props,
+      variables: { GREETING: "hello", CONVEX_DEPLOY_KEY: Redacted.make("key") },
+    };
+    const variables = { CONVEX_DEPLOY_KEY: "secret", GREETING: "plain" } as const;
+    const saved = (production: Partial<typeof settings>) => ({
+      ...output,
+      production: { ...settings, variables, ...production },
+      preview: { ...output.preview, variables },
+    });
+    const diffFrom = (from: RepositoryAttributes) =>
+      diffRepository({ olds: news, news, output: from, accountId, target: resolved });
+
+    // Someone else's variable and another build token stay: no change.
+    expect(
+      diffFrom(saved({ variables: { ...variables, OTHER: "plain" }, buildToken: "other" })),
+    ).toBeUndefined();
+    // A removed or retyped variable is a change.
+    expect(diffFrom(saved({ variables: { GREETING: "plain" } }))).toEqual(keepsAll);
+    expect(diffFrom(saved({ variables: { ...variables, GREETING: "secret" } }))).toEqual(keepsAll);
+    // A token that the props name counts.
+    const pinned = { ...news, buildToken: settings.buildToken };
+    expect(
+      diffRepository({
+        olds: pinned,
+        news: pinned,
+        output: saved({ buildToken: "other" }),
+        accountId,
+        target: resolved,
+      }),
+    ).toEqual(keepsAll);
+  });
+
+  it("updates state from 0.4, which has no repository or settings in its attributes, to save them", () => {
+    const { repository: _, production: __, preview: ___, ...before } = output;
     expect(
       diffRepository({ olds: props, news: props, output: before, accountId, target: resolved }),
     ).toEqual({ action: "update", stables: ["scriptTag", "accountId"] });

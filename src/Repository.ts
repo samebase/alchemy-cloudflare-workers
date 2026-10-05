@@ -17,7 +17,7 @@ import * as workersBuilds from "@distilled.cloud/cloudflare/workers_builds";
 import { Resource } from "alchemy";
 import { Unowned } from "alchemy/AdoptPolicy";
 import { Artifacts } from "alchemy/Artifacts";
-import { havePropsChanged, isResolved, type UpdateDiff } from "alchemy/Diff";
+import { deepEqual, havePropsChanged, isResolved, type UpdateDiff } from "alchemy/Diff";
 import { GitHubEnv } from "alchemy/GitHub";
 import * as Provider from "alchemy/Provider";
 import { StackName } from "alchemy/Stack";
@@ -130,6 +130,30 @@ export interface RepositoryProps {
   readonly previewVariables?: BuildVariables;
 }
 
+/**
+ * Build settings as Workers Builds reports them. Drift detection compares
+ * the settings that read reports with the saved ones, so a change in the
+ * dashboard shows as drift.
+ */
+export interface BuildSettings {
+  readonly buildCommand: string;
+  readonly deployCommand: string;
+  readonly rootDirectory: string;
+  readonly pathIncludes: readonly string[];
+  readonly pathExcludes: readonly string[];
+  readonly buildCachingEnabled: boolean;
+  /** Build token uuid. */
+  readonly buildToken: string;
+  /**
+   * The names of the build variables, each with `"secret"` or `"plain"`.
+   * The values are not kept. Cloudflare never returns a secret value, so a
+   * changed value cannot be seen, and attributes show in plans and drift
+   * reports, so they hold no value. A removed, added, or retyped variable
+   * shows as drift; a changed value does not.
+   */
+  readonly variables: Readonly<Record<string, "secret" | "plain">>;
+}
+
 export interface RepositoryAttributes {
   /** The Worker tag that the configuration belongs to. */
   readonly scriptTag: string;
@@ -146,10 +170,17 @@ export interface RepositoryAttributes {
    * rename on GitHub they can be the old names. The ids stay the same.
    */
   readonly repository: Required<GitHubRepository>;
+  /** Settings of production builds. */
+  readonly production: BuildSettings;
+  /** Settings of preview builds (`previews_base_config`). */
+  readonly preview: BuildSettings;
 }
 
-/** The attributes that state from 0.4 holds: no repository. */
-type RepositoryAttributesBefore05 = Omit<RepositoryAttributes, "repository">;
+/** The attributes that state from 0.4 holds: no repository and no settings. */
+type RepositoryAttributesBefore05 = Omit<
+  RepositoryAttributes,
+  "repository" | "production" | "preview"
+>;
 
 /**
  * The Workers Builds configuration that connects a GitHub repository to a
@@ -180,6 +211,18 @@ const NO_BUILD_CONFIGURATION = 12040;
 /** Error codes Workers Builds answers for a trigger that no longer exists. */
 const TRIGGER_NOT_FOUND = [10007, 12000];
 
+/** Build settings in `/builds/workers` results. Variables hold `value: null` for secrets. */
+const BuildSettingsResult = Schema.Struct({
+  build_command: Schema.String,
+  deploy_command: Schema.String,
+  root_directory: Schema.String,
+  path_includes: Schema.Array(Schema.String),
+  path_excludes: Schema.Array(Schema.String),
+  build_caching_enabled: Schema.Boolean,
+  build_token_uuid: Schema.String,
+  environment_variables: Schema.Record(Schema.String, Schema.Struct({ is_secret: Schema.Boolean })),
+});
+
 /**
  * The fields of `/builds/workers` results that the provider reads. Recorded
  * payloads: test/fixtures/cloudflare/builds_workers_*.json.
@@ -195,7 +238,8 @@ export const WorkerBuilds = Schema.Struct({
     branch: Schema.String,
   }),
   previews_enabled: Schema.Boolean,
-  production_settings: Schema.Struct({ build_token_uuid: Schema.String }),
+  production_settings: BuildSettingsResult,
+  previews_base_config: BuildSettingsResult,
 });
 export type WorkerBuilds = typeof WorkerBuilds.Type;
 
@@ -245,18 +289,34 @@ const previewBuildVariables = (props: RepositoryProps): BuildVariables => ({
 const removedKeys = (before: BuildVariables | undefined, after: BuildVariables) =>
   Object.keys(before ?? {}).filter((key) => !Object.hasOwn(after, key));
 
-const buildSettings = (
-  props: RepositoryProps,
+/** The settings that the props ask for, with the defaults, except the token and the variables. */
+const wantedSettings = (props: RepositoryProps, deployCommand: string) => ({
+  buildCommand: props.buildCommand,
+  deployCommand,
+  rootDirectory: props.rootDirectory ?? "/",
+  pathIncludes: props.pathIncludes ?? ["*"],
+  pathExcludes: props.pathExcludes ?? [],
+  buildCachingEnabled: props.buildCachingEnabled ?? true,
+});
+type WantedSettings = ReturnType<typeof wantedSettings>;
+
+const productionSettings = (props: RepositoryProps) =>
+  wantedSettings(props, props.deployCommand ?? DEFAULT_DEPLOY_COMMAND);
+
+const previewSettings = (props: RepositoryProps) =>
+  wantedSettings(props, props.previewDeployCommand ?? DEFAULT_PREVIEW_DEPLOY_COMMAND);
+
+const settingsBody = (
+  settings: WantedSettings,
   buildToken: string,
-  deployCommand: string,
   environmentVariables: object,
 ) => ({
-  build_command: props.buildCommand,
-  deploy_command: deployCommand,
-  root_directory: props.rootDirectory ?? "/",
-  path_includes: [...(props.pathIncludes ?? ["*"])],
-  path_excludes: [...(props.pathExcludes ?? [])],
-  build_caching_enabled: props.buildCachingEnabled ?? true,
+  build_command: settings.buildCommand,
+  deploy_command: settings.deployCommand,
+  root_directory: settings.rootDirectory,
+  path_includes: [...settings.pathIncludes],
+  path_excludes: [...settings.pathExcludes],
+  build_caching_enabled: settings.buildCachingEnabled,
   build_token_uuid: buildToken,
   environment_variables: environmentVariables,
 });
@@ -277,16 +337,14 @@ export const createBody = (input: {
     repo_name: input.repository.name,
     branch: input.repository.branch,
   },
-  production_settings: buildSettings(
-    input.props,
+  production_settings: settingsBody(
+    productionSettings(input.props),
     input.buildToken,
-    input.props.deployCommand ?? DEFAULT_DEPLOY_COMMAND,
     variablesBody(input.props.variables ?? {}, []),
   ),
-  previews_base_config: buildSettings(
-    input.props,
+  previews_base_config: settingsBody(
+    previewSettings(input.props),
     input.buildToken,
-    input.props.previewDeployCommand ?? DEFAULT_PREVIEW_DEPLOY_COMMAND,
     variablesBody(previewBuildVariables(input.props), []),
   ),
   previews_enabled: input.props.previews ?? true,
@@ -308,16 +366,14 @@ export const updateBody = (input: {
   const preview = previewBuildVariables(input.news);
   return {
     git_repository: { branch: input.branch },
-    production_settings: buildSettings(
-      input.news,
+    production_settings: settingsBody(
+      productionSettings(input.news),
       input.buildToken,
-      input.news.deployCommand ?? DEFAULT_DEPLOY_COMMAND,
       variablesBody(production, removedKeys(input.olds?.variables, production)),
     ),
-    previews_base_config: buildSettings(
-      input.news,
+    previews_base_config: settingsBody(
+      previewSettings(input.news),
       input.buildToken,
-      input.news.previewDeployCommand ?? DEFAULT_PREVIEW_DEPLOY_COMMAND,
       variablesBody(
         preview,
         removedKeys(
@@ -330,6 +386,29 @@ export const updateBody = (input: {
   };
 };
 
+const variableKind = (value: string | Redacted.Redacted<string>) =>
+  Redacted.isRedacted(value) ? "secret" : "plain";
+
+/**
+ * Whether the settings that Workers Builds reported differ from the settings
+ * that the props ask for. The build token counts only when the props name
+ * it. Variables count by name and kind, and only the ones that the props
+ * name: variables that someone else added stay.
+ */
+const settingsDiffer = (
+  saved: BuildSettings,
+  wanted: WantedSettings,
+  variables: BuildVariables,
+  buildToken: string | undefined,
+) => {
+  const { buildToken: savedToken, variables: savedVariables, ...settings } = saved;
+  return (
+    !deepEqual(settings, wanted) ||
+    (buildToken !== undefined && savedToken !== buildToken) ||
+    Object.entries(variables).some(([name, value]) => savedVariables[name] !== variableKind(value))
+  );
+};
+
 /**
  * Update or no change; never a replacement (see the top of this file).
  *
@@ -337,9 +416,10 @@ export const updateBody = (input: {
  * and `output.repository` is the repository that the configuration builds
  * from. Only the repository id counts: GitHub keeps it when a repository
  * gets a new name or owner, and Workers Builds keeps the old names. Another
- * id, branch, Worker, or account, or changed props, is an update. State from
- * 0.4 has no `repository` in its attributes, so the first plan after the
- * upgrade is an update, which saves it.
+ * id, branch, Worker, or account, changed props, or saved settings that
+ * differ from the props are an update. State from 0.4 has no repository and
+ * no settings in its attributes, so the first plan after the upgrade is an
+ * update, which saves them.
  *
  * `stables` names the attributes that the update keeps: the Worker tag and
  * the account unless the configuration moves, and the repository connection
@@ -353,13 +433,27 @@ export const diffRepository = (input: {
   readonly target: Required<GitHubRepository>;
 }): UpdateDiff | undefined => {
   const { olds, news, output, target } = input;
+  const saved = "repository" in output ? output : undefined;
   const moved = output.scriptTag !== news.worker || output.accountId !== input.accountId;
-  const sameRepository =
-    "repository" in output && output.repository.repositoryId === target.repositoryId;
+  const sameRepository = saved?.repository.repositoryId === target.repositoryId;
   const changed =
     moved ||
+    saved === undefined ||
     !sameRepository ||
-    ("repository" in output && output.repository.branch !== target.branch) ||
+    saved.repository.branch !== target.branch ||
+    saved.previewsEnabled !== (news.previews ?? true) ||
+    settingsDiffer(
+      saved.production,
+      productionSettings(news),
+      news.variables ?? {},
+      news.buildToken,
+    ) ||
+    settingsDiffer(
+      saved.preview,
+      previewSettings(news),
+      previewBuildVariables(news),
+      news.buildToken,
+    ) ||
     havePropsChanged(olds, news);
   if (!changed) return undefined;
   return {
@@ -512,7 +606,7 @@ export const RepositoryProvider = () =>
       // One PATCH writes every setting, so the result does not depend on what
       // create and migrate kept. `patch_existing_previews` also applies the
       // preview settings to the previews that exist.
-      builds = yield* cloudflareRequest({
+      yield* cloudflareRequest({
         operation: "update Workers Builds configuration",
         method: "PATCH",
         path,
@@ -523,6 +617,15 @@ export const RepositoryProvider = () =>
           branch: repository.branch,
           buildToken: news.buildToken ?? builds.production_settings.build_token_uuid,
         }),
+        result: Schema.Unknown,
+      });
+      // The attributes come from the same GET as read, so the next drift
+      // check compares like with like. No recorded PATCH result proves that
+      // it holds every field that the attributes need.
+      const saved = yield* cloudflareRequest({
+        operation: "read Workers Builds configuration",
+        method: "GET",
+        path,
         result: WorkerBuilds,
       });
 
@@ -537,7 +640,7 @@ export const RepositoryProvider = () =>
       ) {
         yield* deleteConfiguration(output.accountId, output.scriptTag);
       }
-      return yield* attributesOf(accountId, builds);
+      return yield* attributesOf(accountId, saved);
     }),
 
     delete: Effect.fn(function* ({ output }) {
@@ -603,6 +706,22 @@ const repositoryOf = ({
   repositoryId: Number(repository.repo_id),
 });
 
+/** Build settings in the attribute shape: variable names and kinds, sorted, without values. */
+const settingsOf = (settings: WorkerBuilds["production_settings"]): BuildSettings => ({
+  buildCommand: settings.build_command,
+  deployCommand: settings.deploy_command,
+  rootDirectory: settings.root_directory,
+  pathIncludes: settings.path_includes,
+  pathExcludes: settings.path_excludes,
+  buildCachingEnabled: settings.build_caching_enabled,
+  buildToken: settings.build_token_uuid,
+  variables: Object.fromEntries(
+    Object.entries(settings.environment_variables)
+      .map(([name, variable]) => [name, variable.is_secret ? "secret" : "plain"] as const)
+      .sort(([left], [right]) => left.localeCompare(right)),
+  ),
+});
+
 const attributesOf = (accountId: string, builds: WorkerBuilds) =>
   listTriggers(accountId, builds.script_tag).pipe(
     Effect.map((triggers): RepositoryAttributes => ({
@@ -611,6 +730,8 @@ const attributesOf = (accountId: string, builds: WorkerBuilds) =>
       accountId,
       ...triggerAttributes(triggers),
       repository: repositoryOf(builds),
+      production: settingsOf(builds.production_settings),
+      preview: settingsOf(builds.previews_base_config),
     })),
   );
 

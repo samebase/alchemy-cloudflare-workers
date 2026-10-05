@@ -8,7 +8,7 @@
 import * as workers from "@distilled.cloud/cloudflare/workers";
 import { Resource } from "alchemy";
 import { Unowned } from "alchemy/AdoptPolicy";
-import { isResolved } from "alchemy/Diff";
+import { deepEqual, isResolved } from "alchemy/Diff";
 import { createPhysicalName } from "alchemy/PhysicalName";
 import * as Provider from "alchemy/Provider";
 import * as Effect from "effect/Effect";
@@ -46,7 +46,25 @@ export interface WorkerProps {
   readonly tailConsumers?: readonly { readonly name: string }[];
 }
 
-export interface WorkerAttributes {
+/**
+ * The settings that the props declare, as Cloudflare reports them. Each one
+ * is present only when the props declare it, so drift detection sees a
+ * change of a declared setting and ignores the settings that Wrangler owns.
+ */
+export interface WorkerSettings {
+  readonly subdomain?: {
+    readonly enabled: boolean | null;
+    readonly previewsEnabled: boolean | null;
+  };
+  readonly observability?: workers.BetaWorkersGetResponseObservability;
+  readonly logpush?: boolean;
+  /** Sorted. */
+  readonly tags?: readonly string[];
+  /** Sorted by name. */
+  readonly tailConsumers?: readonly { readonly name: string }[];
+}
+
+export interface WorkerAttributes extends WorkerSettings {
   /** The Worker's immutable id. Workers Builds calls it the Worker tag or `script_tag`. */
   readonly workerId: string;
   readonly name: string;
@@ -152,10 +170,41 @@ export const editBody = (props: WorkerProps): Record<string, unknown> =>
 export const workersDevUrl = (name: string, subdomain: string | undefined): string | undefined =>
   subdomain === undefined ? undefined : `https://${name}.${subdomain}.workers.dev`;
 
+const byName = (left: { readonly name: string }, right: { readonly name: string }) =>
+  left.name.localeCompare(right.name);
+
+/** Whether `observed` holds every field that `declared` sets, with the same value. */
+const holds = (observed: unknown, declared: unknown): boolean => {
+  if (typeof declared !== "object" || declared === null || Array.isArray(declared)) {
+    return deepEqual(observed, declared);
+  }
+  if (typeof observed !== "object" || observed === null) return false;
+  const fields = new Map(Object.entries(observed));
+  return Object.entries(declared).every(([key, value]) => holds(fields.get(key), value));
+};
+
 /**
- * A new explicit name or another account is a new Worker; anything else is
- * an edit. `oldName` is the deployed name. A Worker without `name` keeps it,
- * so only an explicit name that differs replaces the Worker.
+ * Whether a declared setting differs from the saved one. `observability`
+ * counts only the fields that the props set: Cloudflare reports all fields.
+ * A setting that the saved attributes lack, as in state from 0.4, differs.
+ */
+const settingsDiffer = (saved: WorkerSettings, props: WorkerProps) =>
+  (props.subdomain !== undefined && !deepEqual(saved.subdomain, props.subdomain)) ||
+  (props.observability !== undefined && !holds(saved.observability, props.observability)) ||
+  (props.logpush !== undefined && saved.logpush !== props.logpush) ||
+  (props.tags !== undefined && !deepEqual(saved.tags, [...props.tags].sort())) ||
+  (props.tailConsumers !== undefined &&
+    !deepEqual(
+      saved.tailConsumers,
+      props.tailConsumers.map(({ name }) => ({ name })).sort(byName),
+    ));
+
+/**
+ * A new explicit name or another account is a new Worker. A declared
+ * setting that differs from the saved one, such as in state from 0.4, which
+ * saves no settings, is an update. Else the engine updates when a prop
+ * changed. `oldName` is the deployed name. A Worker without `name` keeps
+ * it, so only an explicit name that differs replaces the Worker.
  */
 export const diffWorker = (input: {
   readonly oldName: string;
@@ -166,7 +215,9 @@ export const diffWorker = (input: {
   (input.news.name ?? input.oldName) !== input.oldName ||
   (input.output !== undefined && input.output.accountId !== input.accountId)
     ? ({ action: "replace" } as const)
-    : undefined;
+    : input.output !== undefined && settingsDiffer(input.output, input.news)
+      ? ({ action: "update" } as const)
+      : undefined;
 
 /**
  * The name of a Worker without `name`: Alchemy's physical name from the
@@ -211,7 +262,7 @@ export const WorkerProvider = () =>
       const accountId = output?.accountId ?? (yield* currentAccountId);
       const worker = yield* findWorker(accountId, key);
       if (worker === undefined) return undefined;
-      const attributes = yield* attributesOf(accountId, worker);
+      const attributes = yield* attributesOf(accountId, worker, propsOrEmpty(olds));
       // Without state, a Worker with this name belongs to someone else until --adopt.
       return output === undefined ? Unowned(attributes) : attributes;
     }),
@@ -230,19 +281,23 @@ export const WorkerProvider = () =>
         const created = yield* workers
           .createBetaWorker(createRequest(accountId, name, news))
           .pipe(refused("create Worker"));
-        return yield* attributesOf(accountId, created);
+        return yield* attributesOf(accountId, created, news);
       }
       const body = editBody(news);
-      if (Object.keys(body).length > 0) {
-        yield* cloudflareRequest({
-          operation: "edit Worker",
-          method: "PATCH",
-          path: `/accounts/${accountId}/workers/workers/${existing.id}`,
-          body,
-          result: EditedWorker,
-        });
-      }
-      return yield* attributesOf(accountId, existing);
+      if (Object.keys(body).length === 0) return yield* attributesOf(accountId, existing, news);
+      yield* cloudflareRequest({
+        operation: "edit Worker",
+        method: "PATCH",
+        path: `/accounts/${accountId}/workers/workers/${existing.id}`,
+        body,
+        result: EditedWorker,
+      });
+      // Read the Worker again, so the attributes hold the settings as
+      // Cloudflare saved them, and the next drift check compares with them.
+      const edited = yield* workers
+        .getBetaWorker({ accountId, workerId: existing.id })
+        .pipe(refused("read Worker"));
+      return yield* attributesOf(accountId, edited, news);
     }),
 
     delete: Effect.fn(function* ({ output }) {
@@ -263,7 +318,32 @@ const findWorker = (accountId: string, workerId: string) =>
     refused("read Worker"),
   );
 
-const attributesOf = (accountId: string, worker: { readonly id: string; readonly name: string }) =>
+/** The settings that `props` declare, as the Workers API reports them for `worker`. */
+const settingsOf = (
+  worker: workers.GetBetaWorkerResponse | workers.CreateBetaWorkerResponse,
+  props: WorkerProps,
+): WorkerSettings => ({
+  ...(props.subdomain === undefined
+    ? {}
+    : {
+        subdomain: {
+          enabled: worker.subdomain.enabled ?? null,
+          previewsEnabled: worker.subdomain.previewsEnabled ?? null,
+        },
+      }),
+  ...(props.observability === undefined ? {} : { observability: worker.observability }),
+  ...(props.logpush === undefined ? {} : { logpush: worker.logpush }),
+  ...(props.tags === undefined ? {} : { tags: [...worker.tags].sort() }),
+  ...(props.tailConsumers === undefined
+    ? {}
+    : { tailConsumers: worker.tailConsumers.map(({ name }) => ({ name })).sort(byName) }),
+});
+
+const attributesOf = (
+  accountId: string,
+  worker: workers.GetBetaWorkerResponse | workers.CreateBetaWorkerResponse,
+  props: WorkerProps,
+) =>
   workers.getSubdomain({ accountId }).pipe(
     Effect.map(({ subdomain }) => subdomain),
     Effect.catchTag("SubdomainNotFound", () => Effect.succeed(undefined)),
@@ -273,5 +353,6 @@ const attributesOf = (accountId: string, worker: { readonly id: string; readonly
       name: worker.name,
       url: workersDevUrl(worker.name, subdomain),
       accountId,
+      ...settingsOf(worker, props),
     })),
   );
