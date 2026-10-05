@@ -1,9 +1,10 @@
-// Shared Cloudflare API plumbing for both resources.
+// Shared Cloudflare API plumbing for the resources.
 //
 // `@distilled.cloud/cloudflare` (the client Alchemy uses) covers most calls.
-// It does not expose the Workers Builds `/builds/workers` family, and its
+// It does not expose the Workers Builds `/builds/workers` family, its
 // Worker edit type marks every field as required although the API edits only
-// the fields it receives. Those calls go through `cloudflareRequest` with the
+// the fields it receives, and its secret list type requires a `text` that the
+// API never returns. Those calls go through `cloudflareRequest` with the
 // same credentials and the same HTTP client.
 import { Credentials, formatHeaders } from "@distilled.cloud/cloudflare/Credentials";
 import { CloudflareEnvironment } from "alchemy/Cloudflare";

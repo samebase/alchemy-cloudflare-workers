@@ -10,4 +10,5 @@ export {
   type RepositoryAttributes,
   type RepositoryProps,
 } from "./Repository.ts";
+export { Secret, type SecretAttributes, type SecretProps } from "./Secret.ts";
 export { Worker, type WorkerAttributes, type WorkerProps } from "./Worker.ts";
