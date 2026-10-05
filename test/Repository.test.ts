@@ -199,56 +199,69 @@ describe("diffRepository", () => {
     triggerIds: [],
     previewsEnabled: false,
     accountId,
+    repository: resolved,
   };
+  const diff = (news: RepositoryProps, target = resolved) =>
+    diffRepository({ olds: props, news, output, accountId, target });
+  const keepsAll = { action: "update", stables: ["scriptTag", "repoConnectionId", "accountId"] };
 
-  it.each([
-    ["another Worker", { ...props, worker: "eaeec9c35fa64976a823c246164f4204" }],
-    ["another owner", { ...props, repository: { ...repository, owner: "samebase" } }],
-    ["another repository", { ...props, repository: { ...repository, name: "other" } }],
-  ])("replaces the configuration for %s", (_, news) => {
-    expect(diffRepository({ olds: props, news, output, accountId })).toEqual({
-      action: "replace",
+  it("is no change when the props and the resolved repository match the configuration", () => {
+    expect(diff(props)).toBeUndefined();
+  });
+
+  it("updates a renamed repository, by the id that GitHub keeps, whatever side has the ids", () => {
+    const renamed = { ...resolved, owner: "samebase", name: "renamed" };
+    const { ownerId: _, repositoryId: __, ...names } = renamed;
+    for (const repository of [names, renamed]) {
+      expect(diff({ ...props, repository }, renamed)).toEqual(keepsAll);
+    }
+  });
+
+  it("updates, and never replaces, for another repository id", () => {
+    const other = { ...resolved, name: "other", repositoryId: 1 };
+    expect(diff({ ...props, repository: other }, other)).toEqual({
+      action: "update",
+      stables: ["scriptTag", "accountId"],
     });
   });
 
-  it("replaces the configuration for another repository id, and only then", () => {
-    const pinned = { ...props, repository: { ...repository, repositoryId: 1358278395 } };
-    const other = { ...props, repository: { ...repository, repositoryId: 1 } };
-    expect(diffRepository({ olds: pinned, news: other, output, accountId })).toEqual({
-      action: "replace",
-    });
-    expect(diffRepository({ olds: props, news: pinned, output, accountId })).toBeUndefined();
-    const renamed = { ...props, repository: { ...repository, owner: "Samebase-Live-Tests" } };
-    expect(diffRepository({ olds: props, news: renamed, output, accountId })).toBeUndefined();
-  });
-
-  it("updates a renamed repository: the same id under another owner and name", () => {
-    const pinned = { ...props, repository: { ...repository, repositoryId: 1358278395 } };
-    const renamed = {
-      ...props,
-      repository: { owner: "samebase", name: "renamed", branch: "main", repositoryId: 1358278395 },
-    };
-    expect(diffRepository({ olds: pinned, news: renamed, output, accountId })).toBeUndefined();
-  });
-
-  it("leaves a repository that one side does not name to reconcile", () => {
+  it("updates when the repository of the run changed and the props did not", () => {
     const { repository: _, ...current } = props;
-    expect(diffRepository({ olds: props, news: current, output, accountId })).toBeUndefined();
-    expect(diffRepository({ olds: current, news: props, output, accountId })).toBeUndefined();
+    const fork = { ...resolved, owner: "someone", repositoryId: 2 };
+    expect(
+      diffRepository({ olds: current, news: current, output, accountId, target: fork }),
+    ).toEqual({ action: "update", stables: ["scriptTag", "accountId"] });
   });
 
-  it("replaces the configuration for another account", () => {
+  it("updates when the default branch on GitHub changed", () => {
+    const { branch: _, ...withoutBranch } = repository;
+    const news = { ...props, repository: withoutBranch };
+    expect(
+      diffRepository({
+        olds: news,
+        news,
+        output,
+        accountId,
+        target: { ...resolved, branch: "trunk" },
+      }),
+    ).toEqual(keepsAll);
+  });
+
+  it("updates, and never replaces, for another Worker or account", () => {
+    const moved = { action: "update", stables: [] };
+    expect(diff({ ...props, worker: "eaeec9c35fa64976a823c246164f4204" })).toEqual(moved);
     expect(
       diffRepository({
         olds: props,
         news: props,
         output,
         accountId: "00000000000000000000000000000000",
+        target: resolved,
       }),
-    ).toEqual({ action: "replace" });
+    ).toEqual(moved);
   });
 
-  it("leaves branch, command, variable, and previews changes to the engine as updates", () => {
+  it("updates for branch, command, variable, and previews changes", () => {
     const news: RepositoryProps = {
       ...props,
       repository: { ...repository, branch: "release" },
@@ -256,7 +269,14 @@ describe("diffRepository", () => {
       variables: { GREETING: Redacted.make("hi") },
       previews: false,
     };
-    expect(diffRepository({ olds: props, news, output, accountId })).toBeUndefined();
+    expect(diff(news, { ...resolved, branch: "release" })).toEqual(keepsAll);
+  });
+
+  it("updates state from 0.4, which has no repository in its attributes, to save it", () => {
+    const { repository: _, ...before } = output;
+    expect(
+      diffRepository({ olds: props, news: props, output: before, accountId, target: resolved }),
+    ).toEqual({ action: "update", stables: ["scriptTag", "accountId"] });
   });
 });
 

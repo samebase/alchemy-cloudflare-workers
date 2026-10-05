@@ -1,0 +1,42 @@
+{
+  "created_on": "2026-10-06T00:00:00.000Z",
+  "deployed_on": null,
+  "id": "e8f70fdbc8b1fb0b8ddb1af166186758",
+  "logpush": false,
+  "name": "my-worker",
+  "observability": {
+    "enabled": false,
+    "head_sampling_rate": 1,
+    "logs": {
+      "destinations": [],
+      "enabled": false,
+      "head_sampling_rate": 1,
+      "invocation_logs": true,
+      "persist": true
+    },
+    "redact_query_string": false,
+    "traces": {
+      "destinations": [],
+      "enabled": false,
+      "head_sampling_rate": 1,
+      "persist": true,
+      "propagation_policy": null
+    }
+  },
+  "references": {
+    "dispatch_namespace_outbounds": [],
+    "domains": [],
+    "durable_objects": [],
+    "queues": [],
+    "workers": []
+  },
+  "subdomain": {
+    "enabled": false,
+    "preview_url_suffix": "-my-worker.my-subdomain.workers.dev",
+    "previews_enabled": false,
+    "url": "https://my-worker.my-subdomain.workers.dev"
+  },
+  "tags": ["my-team", "my-public-api"],
+  "tail_consumers": [{ "name": "my-tail-consumer" }],
+  "updated_on": "2026-10-06T00:00:00.000Z"
+}

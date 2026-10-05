@@ -5,12 +5,19 @@
 // then runs the deploy command on each push to the production branch and the
 // preview deploy command on every other branch. This resource never deletes
 // the Worker.
+//
+// The diff of this resource never replaces it. Workers Builds keeps one
+// configuration per Worker, and Alchemy creates a replacement before it
+// deletes the old resource. So a replacement for the same Worker would update
+// the configuration and then delete it. Reconcile changes the one
+// configuration in place instead, also for another repository or Worker.
 import { Credentials } from "@distilled.cloud/cloudflare/Credentials";
 import * as user from "@distilled.cloud/cloudflare/user";
 import * as workersBuilds from "@distilled.cloud/cloudflare/workers_builds";
 import { Resource } from "alchemy";
 import { Unowned } from "alchemy/AdoptPolicy";
-import { isResolved } from "alchemy/Diff";
+import { Artifacts } from "alchemy/Artifacts";
+import { havePropsChanged, isResolved, type UpdateDiff } from "alchemy/Diff";
 import { GitHubEnv } from "alchemy/GitHub";
 import * as Provider from "alchemy/Provider";
 import { StackName } from "alchemy/Stack";
@@ -65,15 +72,16 @@ export interface RepositoryProps {
   readonly worker: string;
   /**
    * The GitHub repository. The Cloudflare Workers and Pages GitHub App must
-   * have access to it. A different repository replaces the configuration; a
-   * different branch is an update. With `repositoryId` on both sides, only
-   * the id counts, so a renamed repository is an update.
+   * have access to it. The plan reads its GitHub id, and only the id counts:
+   * a renamed repository is an update of the same configuration. Another
+   * repository is also an update: the deploy deletes the triggers and the
+   * configuration, then creates the configuration for the new repository.
    *
-   * Without it, the provider uses {@link currentRepository} on each deploy:
-   * the repository of the GitHub Actions run, else the `origin` remote of
-   * the current directory. Then the plan cannot see that the current
-   * repository changed, and a deploy that reconciles the configuration
-   * fails when it builds from another repository.
+   * Without it, the provider uses {@link currentRepository}: the repository
+   * of the GitHub Actions run, else the `origin` remote of the current
+   * directory. When that is another repository than the configuration
+   * builds from, the plan shows an update and the deploy fails: only an
+   * explicit `repository` moves the configuration to another repository.
    */
   readonly repository?: GitHubRepository;
   /** Build command, such as `pnpm run build`. */
@@ -131,11 +139,25 @@ export interface RepositoryAttributes {
   readonly triggerIds: readonly string[];
   readonly previewsEnabled: boolean;
   readonly accountId: string;
+  /**
+   * The repository that the configuration builds from, with its GitHub ids,
+   * and the production branch, as Workers Builds reports them. Workers
+   * Builds keeps the names from the time of the connection, so after a
+   * rename on GitHub they can be the old names. The ids stay the same.
+   */
+  readonly repository: Required<GitHubRepository>;
 }
+
+/** The attributes that state from 0.4 holds: no repository. */
+type RepositoryAttributesBefore05 = Omit<RepositoryAttributes, "repository">;
 
 /**
  * The Workers Builds configuration that connects a GitHub repository to a
  * Worker.
+ *
+ * A change is always an update of the one configuration, never a
+ * replacement. Another repository or Worker deletes the old triggers and
+ * configuration in the same deploy.
  *
  * Destroy removes the triggers and the build configuration. It keeps the
  * Worker and the repository connection: Cloudflare shares one connection
@@ -166,9 +188,11 @@ export const WorkerBuilds = Schema.Struct({
   script_tag: Schema.String,
   git_repository: Schema.Struct({
     provider_type: Schema.String,
+    provider_account_id: Schema.String,
+    provider_account_name: Schema.String,
     repo_id: Schema.String,
     repo_name: Schema.String,
-    provider_account_name: Schema.String,
+    branch: Schema.String,
   }),
   previews_enabled: Schema.Boolean,
   production_settings: Schema.Struct({ build_token_uuid: Schema.String }),
@@ -307,35 +331,45 @@ export const updateBody = (input: {
 };
 
 /**
- * Another Worker, repository, or account is a new configuration; anything
- * else is an update. With `repositoryId` on both sides, only the ids count:
- * GitHub keeps the id when a repository gets a new name or owner. Without
- * them, the names count, and GitHub names are case-insensitive. Adding the
- * numeric ids of the same repository is an update. Without `repository` on
- * one side, the plan cannot compare repositories; reconcile then checks the
- * repository of the configuration.
+ * Update or no change; never a replacement (see the top of this file).
+ *
+ * `target` is the repository that `news` resolve to, with its GitHub ids,
+ * and `output.repository` is the repository that the configuration builds
+ * from. Only the repository id counts: GitHub keeps it when a repository
+ * gets a new name or owner, and Workers Builds keeps the old names. Another
+ * id, branch, Worker, or account, or changed props, is an update. State from
+ * 0.4 has no `repository` in its attributes, so the first plan after the
+ * upgrade is an update, which saves it.
+ *
+ * `stables` names the attributes that the update keeps: the Worker tag and
+ * the account unless the configuration moves, and the repository connection
+ * unless the repository changes.
  */
 export const diffRepository = (input: {
   readonly olds: RepositoryProps;
   readonly news: RepositoryProps;
-  readonly output: RepositoryAttributes | undefined;
+  readonly output: RepositoryAttributes | RepositoryAttributesBefore05;
   readonly accountId: string;
-}) => {
-  const before = input.olds.repository;
-  const after = input.news.repository;
-  const fullName = (repository: GitHubRepository) =>
-    `${repository.owner}/${repository.name}`.toLowerCase();
-  const otherRepository =
-    before !== undefined &&
-    after !== undefined &&
-    (before.repositoryId !== undefined && after.repositoryId !== undefined
-      ? before.repositoryId !== after.repositoryId
-      : fullName(before) !== fullName(after));
-  return input.olds.worker !== input.news.worker ||
-    otherRepository ||
-    (input.output !== undefined && input.output.accountId !== input.accountId)
-    ? ({ action: "replace" } as const)
-    : undefined;
+  readonly target: Required<GitHubRepository>;
+}): UpdateDiff | undefined => {
+  const { olds, news, output, target } = input;
+  const moved = output.scriptTag !== news.worker || output.accountId !== input.accountId;
+  const sameRepository =
+    "repository" in output && output.repository.repositoryId === target.repositoryId;
+  const changed =
+    moved ||
+    !sameRepository ||
+    ("repository" in output && output.repository.branch !== target.branch) ||
+    havePropsChanged(olds, news);
+  if (!changed) return undefined;
+  return {
+    action: "update",
+    stables: moved
+      ? []
+      : sameRepository
+        ? ["scriptTag", "repoConnectionId", "accountId"]
+        : ["scriptTag", "accountId"],
+  };
 };
 
 /** Sorted like the Samebase token picker: name descending, then uuid. */
@@ -378,13 +412,18 @@ const BUILD_TOKEN_PAGE_SIZE = 100;
 
 export const RepositoryProvider = () =>
   Provider.succeed(Repository, {
-    stables: ["scriptTag", "repoConnectionId", "accountId"],
-
     diff: Effect.fn(function* ({ olds, news, output }) {
-      if (!isResolved(news)) return undefined;
-      // Otherwise undefined: the engine updates when any prop changed and
-      // compares Redacted variable values by content.
-      return diffRepository({ olds, news, output, accountId: yield* currentAccountId });
+      // Unresolved props, such as the tag of a Worker that the same deploy
+      // replaces, and an interrupted create: the engine updates when any
+      // prop changed. It compares Redacted variable values by content.
+      if (!isResolved(news) || output === undefined) return undefined;
+      return diffRepository({
+        olds,
+        news,
+        output,
+        accountId: yield* currentAccountId,
+        target: yield* resolveRepositoryOnce(news.repository),
+      });
     }),
 
     read: Effect.fn(function* ({ olds, output }) {
@@ -396,28 +435,64 @@ export const RepositoryProvider = () =>
       return output === undefined ? Unowned(attributes) : attributes;
     }),
 
-    reconcile: Effect.fn(function* ({ news, olds }) {
+    reconcile: Effect.fn(function* ({ news, olds, output }) {
       const accountId = yield* currentAccountId;
       const scriptTag = news.worker;
       const path = `/accounts/${accountId}/builds/workers/${scriptTag}`;
-      const repository = yield* resolveRepository(news.repository);
+      const repository = yield* resolveRepositoryOnce(news.repository);
       let builds = yield* getBuilds(accountId, scriptTag);
+      // Kept when the configuration is created again for another repository.
+      const buildToken = news.buildToken ?? builds?.production_settings.build_token_uuid;
+
+      if (
+        builds !== undefined &&
+        Number(builds.git_repository.repo_id) !== repository.repositoryId
+      ) {
+        const from = `${builds.git_repository.provider_account_name}/${builds.git_repository.repo_name}`;
+        const to = `${repository.owner}/${repository.name}`;
+        // Only a configuration that this resource wrote for this Worker
+        // moves to another repository. An adopted configuration, or one
+        // that an interrupted create found, belongs to someone else.
+        if (
+          olds === undefined ||
+          output?.scriptTag !== scriptTag ||
+          output.accountId !== accountId
+        ) {
+          return yield* new WorkersBuildsError({
+            operation: "check Workers Builds repository",
+            message: `Worker ${scriptTag} builds from ${from}, not ${to}. Disconnect it in the Cloudflare dashboard first.`,
+          });
+        }
+        // The repository of the run is not an intent to move the builds:
+        // a clone of a fork must not take over the configuration.
+        if (news.repository === undefined) {
+          return yield* new WorkersBuildsError({
+            operation: "check Workers Builds repository",
+            message: `Worker ${scriptTag} builds from ${from}, not ${to}, the repository of this run. To move the builds to ${to}, pass repository. Else run the deploy from a clone of ${from}.`,
+          });
+        }
+        // Another repository for the same Worker. Workers Builds keeps one
+        // configuration per Worker, and its PATCH changes only the branch
+        // of the repository. So this reconcile deletes the old triggers and
+        // the old configuration first, and then creates the configuration
+        // for the new repository below, in that order. If the create fails,
+        // the next deploy finds no configuration and creates it.
+        yield* deleteConfiguration(accountId, scriptTag);
+        builds = undefined;
+      }
 
       if (builds === undefined) {
-        const buildToken = yield* resolveBuildToken(accountId, news.buildToken);
         builds = yield* cloudflareRequest({
           operation: "create Workers Builds configuration",
           method: "POST",
           path: `/accounts/${accountId}/builds/workers`,
-          body: createBody({ scriptTag, props: news, repository, buildToken }),
+          body: createBody({
+            scriptTag,
+            props: news,
+            repository,
+            buildToken: yield* resolveBuildToken(accountId, buildToken),
+          }),
           result: WorkerBuilds,
-        });
-      } else if (builds.git_repository.repo_id !== String(repository.repositoryId)) {
-        // Adopted, created by an interrupted run, or a current repository
-        // that changed since the last deploy: it must build this repository.
-        return yield* new WorkersBuildsError({
-          operation: "check Workers Builds repository",
-          message: `Worker ${scriptTag} builds from ${builds.git_repository.provider_account_name}/${builds.git_repository.repo_name}, not ${repository.owner}/${repository.name}. Disconnect it in the Cloudflare dashboard first.`,
         });
       }
 
@@ -450,35 +525,55 @@ export const RepositoryProvider = () =>
         }),
         result: WorkerBuilds,
       });
+
+      // The configuration moved to another Worker or account, such as when
+      // the Worker was replaced. The engine does not delete the old
+      // configuration, because this resource is never replaced, so this
+      // reconcile does, after the new configuration exists.
+      if (
+        olds !== undefined &&
+        output !== undefined &&
+        (output.scriptTag !== scriptTag || output.accountId !== accountId)
+      ) {
+        yield* deleteConfiguration(output.accountId, output.scriptTag);
+      }
       return yield* attributesOf(accountId, builds);
     }),
 
     delete: Effect.fn(function* ({ output }) {
-      const { accountId, scriptTag } = output;
-      // Triggers first, as Samebase deletes them, then the configuration.
-      for (const triggerUuid of triggerAttributes(yield* listTriggers(accountId, scriptTag))
-        .triggerIds) {
-        yield* workersBuilds.deleteTrigger({ accountId, triggerUuid }).pipe(
-          Effect.catchIf(
-            (error) =>
-              isNotFound(error) ||
-              (error._tag === "UnknownCloudflareError" &&
-                error.code !== undefined &&
-                TRIGGER_NOT_FOUND.includes(error.code)),
-            () => Effect.void,
-          ),
-          refused("delete build trigger"),
-        );
-      }
-      yield* absentAsUndefined([NO_BUILD_CONFIGURATION])(
-        cloudflareRequest({
-          operation: "delete Workers Builds configuration",
-          method: "DELETE",
-          path: `/accounts/${accountId}/builds/workers/${scriptTag}`,
-          result: Schema.Unknown,
-        }),
-      );
+      yield* deleteConfiguration(output.accountId, output.scriptTag);
     }),
+  });
+
+/**
+ * Deletes the build triggers, as Samebase deletes them, and then the
+ * configuration. A trigger or configuration that is already gone is not an
+ * error.
+ */
+const deleteConfiguration = (accountId: string, scriptTag: string) =>
+  Effect.gen(function* () {
+    for (const triggerUuid of triggerAttributes(yield* listTriggers(accountId, scriptTag))
+      .triggerIds) {
+      yield* workersBuilds.deleteTrigger({ accountId, triggerUuid }).pipe(
+        Effect.catchIf(
+          (error) =>
+            isNotFound(error) ||
+            (error._tag === "UnknownCloudflareError" &&
+              error.code !== undefined &&
+              TRIGGER_NOT_FOUND.includes(error.code)),
+          () => Effect.void,
+        ),
+        refused("delete build trigger"),
+      );
+    }
+    yield* absentAsUndefined([NO_BUILD_CONFIGURATION])(
+      cloudflareRequest({
+        operation: "delete Workers Builds configuration",
+        method: "DELETE",
+        path: `/accounts/${accountId}/builds/workers/${scriptTag}`,
+        result: Schema.Unknown,
+      }),
+    );
   });
 
 const getBuilds = (accountId: string, scriptTag: string) =>
@@ -497,6 +592,17 @@ const listTriggers = (accountId: string, scriptTag: string) =>
     refused("list build triggers"),
   );
 
+/** The repository of a configuration, with the GitHub ids that Workers Builds keeps as strings. */
+const repositoryOf = ({
+  git_repository: repository,
+}: WorkerBuilds): Required<GitHubRepository> => ({
+  owner: repository.provider_account_name,
+  name: repository.repo_name,
+  branch: repository.branch,
+  ownerId: Number(repository.provider_account_id),
+  repositoryId: Number(repository.repo_id),
+});
+
 const attributesOf = (accountId: string, builds: WorkerBuilds) =>
   listTriggers(accountId, builds.script_tag).pipe(
     Effect.map((triggers): RepositoryAttributes => ({
@@ -504,6 +610,7 @@ const attributesOf = (accountId: string, builds: WorkerBuilds) =>
       previewsEnabled: builds.previews_enabled,
       accountId,
       ...triggerAttributes(triggers),
+      repository: repositoryOf(builds),
     })),
   );
 
@@ -689,4 +796,21 @@ export const resolveRepository = (repository: GitHubRepository | undefined) =>
       ownerId: repository?.ownerId ?? github.ownerId,
       repositoryId: repository?.repositoryId ?? github.repositoryId,
     } satisfies Required<GitHubRepository>;
+  });
+
+/**
+ * {@link resolveRepository} once per deploy and resource: the plan's diff
+ * and the apply's reconcile share the result through Alchemy's artifacts of
+ * the run, so they decide on the same repository and GitHub gets one call.
+ * Only a result is kept, so a failed read is tried again.
+ */
+const resolveRepositoryOnce = (repository: GitHubRepository | undefined) =>
+  Effect.gen(function* () {
+    const artifacts = yield* Artifacts;
+    const key = `WorkersBuilds.Repository/${JSON.stringify(repository ?? null)}`;
+    const resolved = yield* artifacts.get<Required<GitHubRepository>>(key);
+    if (resolved !== undefined) return resolved;
+    const read = yield* resolveRepository(repository);
+    yield* artifacts.set(key, read);
+    return read;
   });
