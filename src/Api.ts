@@ -44,7 +44,7 @@ export class WorkersBuildsError extends Schema.TaggedError<WorkersBuildsError>()
   },
 ) {}
 
-export const permissionError = (operation: string, reason: string) =>
+const permissionError = (operation: string, reason: string) =>
   new PermissionError({
     operation,
     reason,
@@ -98,21 +98,48 @@ const Envelope = Schema.Struct({
   ),
   result: Schema.optionalKey(Schema.Unknown),
 });
-const decodeEnvelope = Schema.decodeUnknownEffect(Envelope);
+/** Cloudflare answers a body that is not JSON for some errors, such as an HTML 403 page. */
+const decodeEnvelope = Schema.decodeUnknownEffect(Schema.fromJsonString(Envelope));
+
+export interface CloudflareRequest<A> {
+  readonly operation: string;
+  readonly method: "GET" | "POST" | "PATCH" | "DELETE";
+  /** Path after the API base URL, such as `/accounts/<id>/builds/workers`. */
+  readonly path: string;
+  readonly query?: Readonly<Record<string, string>>;
+  readonly body?: object;
+  /** Schema of the envelope's `result`. */
+  readonly result: Schema.Decoder<A>;
+}
 
 /**
- * Reads a Cloudflare envelope: the decoded `result` on success, otherwise
- * {@link PermissionError} for HTTP 401, HTTP 403, or error 12006, and
- * {@link WorkersBuildsError} with the first error's code and message.
+ * One Cloudflare API call with the stack's Cloudflare credentials. Returns
+ * the decoded `result`. Fails with {@link PermissionError} for HTTP 401,
+ * HTTP 403, or error 12006, and otherwise with {@link WorkersBuildsError},
+ * which keeps the first error's code and message. The body can hold
+ * secrets; never log it.
  */
-export const readEnvelope = <A>(
-  operation: string,
-  status: number,
-  body: unknown,
-  result: Schema.Decoder<A>,
-): Effect.Effect<A, PermissionError | WorkersBuildsError> =>
+export const cloudflareRequest = <A>(request: CloudflareRequest<A>) =>
   Effect.gen(function* () {
-    const envelope = Option.getOrUndefined(yield* Effect.option(decodeEnvelope(body)));
+    const { operation } = request;
+    const credentials = yield* yield* Credentials;
+    const client = yield* HttpClient.HttpClient;
+    const base = HttpClientRequest.make(request.method)(
+      `${credentials.apiBaseUrl}${request.path}`,
+    ).pipe(
+      HttpClientRequest.setHeaders(formatHeaders(credentials)),
+      HttpClientRequest.setUrlParams(request.query ?? {}),
+    );
+    const transportError = (cause: { readonly message: string }) =>
+      new WorkersBuildsError({ operation, message: `${operation}: ${cause.message}` });
+    const response = yield* client
+      .execute(
+        request.body === undefined ? base : HttpClientRequest.bodyJsonUnsafe(base, request.body),
+      )
+      .pipe(Effect.mapError(transportError));
+    const { status } = response;
+    const text = yield* response.text.pipe(Effect.mapError(transportError));
+    const envelope = Option.getOrUndefined(yield* Effect.option(decodeEnvelope(text)));
     const first = envelope?.errors[0];
     if (status === 401 || status === 403 || first?.code === BUILDS_INVALID_TOKEN) {
       return yield* permissionError(
@@ -135,7 +162,7 @@ export const readEnvelope = <A>(
         message: `${operation}: ${first?.message ?? `HTTP ${status}`}`,
       });
     }
-    return yield* Schema.decodeUnknownEffect(result)(envelope.result).pipe(
+    return yield* Schema.decodeUnknownEffect(request.result)(envelope.result).pipe(
       Effect.mapError(
         (issue) =>
           new WorkersBuildsError({
@@ -146,50 +173,6 @@ export const readEnvelope = <A>(
       ),
     );
   });
-
-export interface CloudflareRequest<A> {
-  readonly operation: string;
-  readonly method: "GET" | "POST" | "PATCH" | "DELETE";
-  /** Path after the API base URL, such as `/accounts/<id>/builds/workers`. */
-  readonly path: string;
-  readonly query?: Readonly<Record<string, string>>;
-  readonly body?: object;
-  /** Schema of the envelope's `result`. */
-  readonly result: Schema.Decoder<A>;
-}
-
-/** One Cloudflare API call with the stack's Cloudflare credentials. The body can hold secrets; never log it. */
-export const cloudflareRequest = <A>(request: CloudflareRequest<A>) =>
-  Effect.gen(function* () {
-    const credentials = yield* yield* Credentials;
-    const client = yield* HttpClient.HttpClient;
-    const base = HttpClientRequest.make(request.method)(
-      `${credentials.apiBaseUrl}${request.path}`,
-    ).pipe(
-      HttpClientRequest.setHeaders(formatHeaders(credentials)),
-      HttpClientRequest.setUrlParams(request.query ?? {}),
-    );
-    const transportError = (cause: { readonly message: string }) =>
-      new WorkersBuildsError({
-        operation: request.operation,
-        message: `${request.operation}: ${cause.message}`,
-      });
-    const response = yield* client
-      .execute(
-        request.body === undefined ? base : HttpClientRequest.bodyJsonUnsafe(base, request.body),
-      )
-      .pipe(Effect.mapError(transportError));
-    const text = yield* response.text.pipe(Effect.mapError(transportError));
-    return yield* readEnvelope(request.operation, response.status, parseJson(text), request.result);
-  });
-
-const parseJson = (text: string): unknown => {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-};
 
 /**
  * Turns "not found" into `undefined` so read and delete stay idempotent:

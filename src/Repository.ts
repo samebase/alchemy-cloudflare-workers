@@ -165,14 +165,17 @@ export interface RepositoryIds {
   readonly repositoryId: string;
 }
 
-const variable = (value: string | Redacted.Redacted<string>) =>
-  Redacted.isRedacted(value)
-    ? { value: Redacted.value(value), is_secret: true }
-    : { value, is_secret: false };
-
+/** `null` removes a variable. A Redacted value becomes a secret, which Cloudflare never returns. */
 const variablesBody = (variables: BuildVariables, removed: readonly string[]) => ({
   ...Object.fromEntries(removed.map((key) => [key, null])),
-  ...Object.fromEntries(Object.entries(variables).map(([key, value]) => [key, variable(value)])),
+  ...Object.fromEntries(
+    Object.entries(variables).map(([key, value]) => [
+      key,
+      Redacted.isRedacted(value)
+        ? { value: Redacted.value(value), is_secret: true }
+        : { value, is_secret: false },
+    ]),
+  ),
 });
 
 /** Variables of preview builds: `variables` with `previewVariables` on top. */
