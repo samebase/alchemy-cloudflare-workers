@@ -14,7 +14,7 @@ The package adds only what the built-in `alchemy/Cloudflare` provider does not h
 
 This is a community provider, maintained by [Samebase](https://samebase.com).
 
-Status: 0.4, pinned to `alchemy@2.0.0-beta.80` and Effect 4. Alchemy ships breaking changes
+Status: 0.5, pinned to `alchemy@2.0.0-beta.80` and Effect 4. Alchemy ships breaking changes
 between betas. Upgrade this package and Alchemy together.
 
 ## Ownership rule
@@ -130,14 +130,15 @@ branch.
 2. Else the `origin` remote of the current directory (`git remote get-url origin`), in the form
    `https://github.com/<owner>/<name>` or `git@github.com:<owner>/<name>`, with or without `.git`.
 
-When neither gives a GitHub repository, the deploy fails with `WorkersBuildsError`. The provider
-then reads the GitHub ids and, without `repository.branch`, the default branch from one call to
-`GET https://api.github.com/repos/{owner}/{name}`. For a private repository, set `GITHUB_TOKEN`. In
-GitHub Actions, pass `GITHUB_TOKEN: ${{ github.token }}` in `env`.
+When neither gives a GitHub repository, the plan or the deploy fails with `WorkersBuildsError`.
+The provider then reads the GitHub ids and, without `repository.branch`, the default branch from
+one call to `GET https://api.github.com/repos/{owner}/{name}`. For a private repository, set
+`GITHUB_TOKEN`. In GitHub Actions, pass `GITHUB_TOKEN: ${{ github.token }}` in `env`.
 
-The plan does not see a change of the current repository. A deploy that reconciles the
-configuration fails with `WorkersBuildsError` when the configuration builds from another
-repository.
+The plan reads the repository of the run. When the configuration builds from another repository,
+the plan shows an update, and the deploy fails with `WorkersBuildsError`. The repository of the run
+never moves the builds to another repository, because a clone of a fork must not take over the
+production builds. To move the builds, pass `repository`.
 
 `WorkersBuilds.currentRepository` is the same resolver, for names in the run file. It yields
 `{ owner, name, defaultBranch, ownerId, repositoryId }`. A run file can fail only with
@@ -209,7 +210,8 @@ and `GET /accounts/{account_id}/workers/subdomain`.
 | `tailConsumers` | `[]`                                                 | update  |
 
 Outputs: `workerId` (the Worker tag), `name`, `url`
-(`https://<name>.<account subdomain>.workers.dev`), `accountId`.
+(`https://<name>.<account subdomain>.workers.dev`), `accountId`, and each setting that the props
+declare, as Cloudflare reports it. See [What drift detection sees](#what-drift-detection-sees).
 
 - Defaults apply on create only. An update sends only the props that you set.
 - Destroy deletes the Worker with all of its versions, deployments, and preview URLs. A Worker that
@@ -228,11 +230,11 @@ Calls `GET`, `POST`, `PATCH`, and `DELETE /accounts/{account_id}/builds/workers[
 
 | Prop                                  | Default                   | Change                                          |
 | ------------------------------------- | ------------------------- | ----------------------------------------------- |
-| `worker`                              | required                  | replace                                         |
+| `worker`                              | required                  | update, see Another Worker below                |
 | `repository`                          | the repository of the run | see [Without `repository`](#without-repository) |
-| `repository.owner`, `.name`           | required in `repository`  | replace, see Renames below                      |
+| `repository.owner`, `.name`           | required in `repository`  | update, see Renames below                       |
 | `repository.branch`                   | default branch on GitHub  | update                                          |
-| `repository.ownerId`, `.repositoryId` | read from GitHub          | replace when the id changes                     |
+| `repository.ownerId`, `.repositoryId` | read from GitHub          | update, see Another repository below            |
 | `buildCommand`                        | required                  | update                                          |
 | `deployCommand`                       | `npx wrangler deploy`     | update                                          |
 | `previewDeployCommand`                | `npx wrangler preview`    | update                                          |
@@ -245,15 +247,29 @@ Calls `GET`, `POST`, `PATCH`, and `DELETE /accounts/{account_id}/builds/workers[
 | `variables`                           | none                      | update                                          |
 | `previewVariables`                    | none                      | update                                          |
 
-Outputs: `scriptTag`, `repoConnectionId`, `triggerIds`, `previewsEnabled`, `accountId`.
+Outputs: `scriptTag`, `repoConnectionId`, `triggerIds`, `previewsEnabled`, `accountId`,
+`repository` (the repository that the configuration builds from, with its GitHub ids, and the
+production branch), and `production` and `preview` (the build settings). See
+[What drift detection sees](#what-drift-detection-sees).
 
+- Never replaced: every change is an update of the one configuration. Workers Builds keeps one
+  configuration per Worker, and Alchemy creates a replacement before it deletes the old resource.
+  A replacement for the same Worker would update the configuration and then delete it.
 - GitHub ids: Workers Builds addresses a repository by its numeric GitHub ids. Without `ownerId`,
   `repositoryId`, and `branch`, the provider reads them from the GitHub API with `GITHUB_TOKEN` or
-  `GITHUB_ACCESS_TOKEN`, or without a token for a public repository. It reads them on each deploy
-  that reconciles the configuration.
-- Renames: GitHub keeps the repository id when a repository gets a new name or owner. With
-  `repositoryId` in the old and the new props, only the ids count, so a renamed repository is an
-  update, not a replacement. Without the ids, another owner or name replaces the configuration.
+  `GITHUB_ACCESS_TOKEN`, or without a token for a public repository. The plan reads them once per
+  deploy, and the deploy uses the same result.
+- Renames: GitHub keeps the repository id when a repository gets a new name or owner. The plan
+  compares the id of the new name with the id that the configuration builds from. The same id is
+  an update of the same configuration: one PATCH, and no delete. The props need no ids for this.
+  Workers Builds keeps the old names in the configuration; the builds continue.
+- Another repository: another repository id is also an update. The deploy deletes the build
+  triggers and the configuration, and then creates the configuration for the new repository, in
+  that order. The new configuration keeps the build token. Variables that someone else added are
+  gone. If the create fails, the next deploy creates the configuration. Only an explicit
+  `repository` prop moves the builds to another repository.
+- Another Worker: another `worker`, such as after a replacement of the Worker, creates the
+  configuration for the new Worker, and then deletes the configuration of the old Worker.
 - Build token: Workers Builds deploys with the API token behind a build token. Without
   `buildToken`, a new configuration uses the account's first build token (by name, newest first),
   and an existing configuration keeps its token. If the account has no build token, the provider
@@ -273,9 +289,9 @@ Outputs: `scriptTag`, `repoConnectionId`, `triggerIds`, `previewsEnabled`, `acco
 - Destroy removes the build triggers and the build configuration. It keeps the Worker and the
   repository connection, because every Worker that builds from the same repository shares that
   connection.
-- An existing configuration for the Worker is adopted only with `--adopt`. Each deploy that
-  reconciles the configuration checks that it builds from the repository, by id. If it builds from
-  another repository, the deploy fails with `WorkersBuildsError`.
+- An existing configuration for the Worker is adopted only with `--adopt`. If an adopted
+  configuration builds from another repository, the deploy fails with `WorkersBuildsError`. The
+  provider moves only a configuration that it wrote.
 
 ### `WorkersBuilds.Secret`
 
@@ -300,6 +316,33 @@ Outputs: `workerName`, `name`, `accountId`.
 - Destroy deletes the secret. A secret or Worker that is already gone is not an error.
 - An existing secret with the same name is adopted only with `--adopt`. The first deploy after
   `--adopt` writes the value.
+
+## What drift detection sees
+
+`alchemy drift` and `alchemy deploy --detect-drift` read each resource from Cloudflare and compare
+the result with the attributes in state. A difference is drift. The repair writes the props of the
+last deploy again.
+
+- `WorkersBuilds.Repository`: the repository and its GitHub ids, the production branch, the
+  triggers, the repository connection, Worker Previews, and for production and preview builds: the
+  build command, the deploy command, the root directory, the path filters, build caching, the build
+  token, and the names of the variables, each `"secret"` or `"plain"`.
+- `WorkersBuilds.Worker`: only the settings that the props declare: `subdomain`, `observability`
+  (each field that Cloudflare reports), `logpush`, `tags`, and `tailConsumers`. A setting that the
+  props leave out is not drift, because the Wrangler file can own it.
+- `WorkersBuilds.Secret`: only that the name exists.
+
+Variable values are not in the attributes. Cloudflare never returns a secret value, so a changed
+secret value cannot be seen. The attributes also show in plans and drift reports, so they hold no
+value. Thus a changed value is not drift. A removed variable, an added variable, and a variable
+that changed between plain and secret are drift. To write all values again, run
+`alchemy deploy --force`.
+
+The repair keeps a variable that someone else added, as a deploy does, and saves its name in the
+attributes. The next drift check then shows no drift.
+
+The first deploy after an upgrade from 0.4 is an update of each `WorkersBuilds.Repository`, and of
+each `WorkersBuilds.Worker` that declares a setting. It saves the new attributes.
 
 ## Limits
 
