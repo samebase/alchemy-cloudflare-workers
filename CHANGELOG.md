@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.3.1
+
+An account without a build token no longer needs a manual step in the Cloudflare dashboard.
+
+- `WorkersBuilds.Repository`: without `buildToken`, on an account without a build token, the
+  provider registers the stack's API token as a build token named `alchemy-<stack name>`. It reads
+  the token id from `GET /user/tokens/verify` and calls `POST /accounts/{account_id}/builds/tokens`.
+  Before, the deploy failed and told you to connect a Worker to Git once in the dashboard. The order
+  is `buildToken`, then the account's first build token, then the registration.
+- Destroy keeps the registered build token: build tokens belong to the account, and other
+  configurations can use them.
+- Workers Builds accepts only API tokens. With the OAuth login or a global API key, the provider
+  cannot register a build token, and the deploy fails with `WorkersBuildsError`, as before.
+- Docs: Workers Builds deploys with the registered token, so the token needs the permissions of the
+  deploy: Workers Scripts: Edit, and R2, KV, and D1 edit when the Wrangler file binds them.
+- Unit tests prove the requests and the order on payloads from Cloudflare's API schema. No live run
+  has registered a build token yet.
+
 ## 0.3.0
 
 A run file can now leave out the Worker name and the repository, so it works unchanged in each fork

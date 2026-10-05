@@ -62,6 +62,17 @@ Alchemy uses environment credentials only when both variables are set. They then
 profile for the whole stack, so also give the token the permissions that the other resources in
 the stack need.
 
+When the account has no build token and `WorkersBuilds.Repository` has no `buildToken`, the
+provider registers this token as the build token (see [Build token](#workersbuildsrepository)).
+Workers Builds then deploys with it, so also give it the permissions of the deploy:
+
+- Workers Scripts: Edit (in the list above)
+- Workers R2 Storage: Edit, Workers KV Storage: Edit, and D1: Edit, when the Wrangler file binds
+  R2 buckets, KV namespaces, or D1 databases
+
+To register the token, the provider needs no other permission. If you roll or delete the token,
+the builds that deploy with it fail.
+
 The Cloudflare Workers and Pages GitHub App must have access to the repository. Install it once from
 **Workers & Pages** in the Cloudflare dashboard.
 
@@ -185,9 +196,9 @@ Outputs: `workerId` (the Worker tag), `name`, `url`
 ### `WorkersBuilds.Repository`
 
 Calls `GET`, `POST`, `PATCH`, and `DELETE /accounts/{account_id}/builds/workers[/{script_tag}]`,
-`POST .../builds/workers/{script_tag}/migrate_to_previews`, `GET .../builds/tokens`,
-`GET .../builds/workers/{script_tag}/triggers`, `DELETE .../builds/triggers/{trigger_uuid}`, and
-`GET https://api.github.com/repos/{owner}/{name}`.
+`POST .../builds/workers/{script_tag}/migrate_to_previews`, `GET` and `POST .../builds/tokens`,
+`GET /user/tokens/verify`, `GET .../builds/workers/{script_tag}/triggers`,
+`DELETE .../builds/triggers/{trigger_uuid}`, and `GET https://api.github.com/repos/{owner}/{name}`.
 
 | Prop                                  | Default                   | Change                                          |
 | ------------------------------------- | ------------------------- | ----------------------------------------------- |
@@ -219,8 +230,13 @@ Outputs: `scriptTag`, `repoConnectionId`, `triggerIds`, `previewsEnabled`, `acco
   update, not a replacement. Without the ids, another owner or name replaces the configuration.
 - Build token: Workers Builds deploys with the API token behind a build token. Without
   `buildToken`, a new configuration uses the account's first build token (by name, newest first),
-  and an existing configuration keeps its token. If the account has no build token, connect any
-  Worker to Git once in the dashboard. Cloudflare then creates one.
+  and an existing configuration keeps its token. If the account has no build token, the provider
+  registers the stack's API token (`CLOUDFLARE_API_TOKEN`) as a build token named
+  `alchemy-<stack name>`, with the token id from `GET /user/tokens/verify`. The token then needs
+  the permissions of the deploy, see [Credentials](#credentials). Destroy keeps the build token,
+  because build tokens belong to the account and other configurations can use them. Workers Builds
+  accepts only API tokens: with the OAuth login or a global API key, the provider cannot register
+  one, and the deploy fails with `WorkersBuildsError`.
 - Previews: with `previews: true`, Cloudflare builds a preview deployment with its own URL for each
   branch. Cloudflare can create legacy branch triggers even when the request enables previews. The
   provider then calls `migrate_to_previews`.
@@ -262,8 +278,8 @@ Outputs: `workerName`, `name`, `accountId`.
 ## Limits
 
 - GitHub only. Workers Builds also supports GitLab; this package does not.
-- The package cannot create a build token. A build token wraps an account API token, and creating
-  one needs more permissions than the three above.
+- The package never creates an API token. It registers only the stack's own API token as a build
+  token. No live run has registered a build token yet.
 - Secret build variables and `WorkersBuilds.Secret` values are part of Alchemy state. Alchemy's
   Cloudflare state store encrypts state at rest; the local file store does not.
 - Turning `previews` from `true` to `false` sends `previews_enabled: false`. The live tests do not
@@ -281,8 +297,8 @@ pnpm run test:live        # real API calls, see below
 ```
 
 Unit tests run against recorded Cloudflare and GitHub payloads in `test/fixtures/`, and against
-secret payloads that follow Cloudflare's API schema until a live run records them. They make no
-network calls.
+secret and build token payloads that follow Cloudflare's API schema until a live run records them.
+They make no network calls.
 
 Live tests run only with `ALCHEMY_WORKERS_BUILDS_LIVE=1`:
 

@@ -5,12 +5,15 @@
 // then runs the deploy command on each push to the production branch and the
 // preview deploy command on every other branch. This resource never deletes
 // the Worker.
+import { Credentials } from "@distilled.cloud/cloudflare/Credentials";
+import * as user from "@distilled.cloud/cloudflare/user";
 import * as workersBuilds from "@distilled.cloud/cloudflare/workers_builds";
 import { Resource } from "alchemy";
 import { Unowned } from "alchemy/AdoptPolicy";
 import { isResolved } from "alchemy/Diff";
 import { GitHubEnv } from "alchemy/GitHub";
 import * as Provider from "alchemy/Provider";
+import { StackName } from "alchemy/Stack";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -94,7 +97,9 @@ export interface RepositoryProps {
   /**
    * Build token uuid. Builds deploys with the API token behind it. Without
    * it, a new configuration uses the account's first build token (by name,
-   * newest first), and an existing configuration keeps its token.
+   * newest first), and an existing configuration keeps its token. When the
+   * account has no build token, the provider registers the stack's API token
+   * as a build token named `alchemy-<stack name>`.
    */
   readonly buildToken?: string;
   /**
@@ -399,7 +404,7 @@ export const RepositoryProvider = () =>
       let builds = yield* getBuilds(accountId, scriptTag);
 
       if (builds === undefined) {
-        const buildToken = news.buildToken ?? (yield* firstBuildToken(accountId));
+        const buildToken = yield* resolveBuildToken(accountId, news.buildToken);
         builds = yield* cloudflareRequest({
           operation: "create Workers Builds configuration",
           method: "POST",
@@ -502,6 +507,17 @@ const attributesOf = (accountId: string, builds: WorkerBuilds) =>
     })),
   );
 
+/**
+ * The build token of a new configuration, in this order: `buildToken`, the
+ * account's first build token, else the stack's API token, which the
+ * provider registers as a build token.
+ */
+export const resolveBuildToken = (accountId: string, buildToken: string | undefined) =>
+  Effect.gen(function* () {
+    if (buildToken !== undefined) return buildToken;
+    return (yield* firstBuildToken(accountId)) ?? (yield* registerBuildToken(accountId));
+  });
+
 const firstBuildToken = (accountId: string) =>
   Effect.gen(function* () {
     const tokens: workersBuilds.ListTokensResultItem[] = [];
@@ -512,14 +528,43 @@ const firstBuildToken = (accountId: string) =>
       tokens.push(...batch);
       if (batch.length < BUILD_TOKEN_PAGE_SIZE) break;
     }
-    const uuid = selectBuildToken(tokens);
-    if (uuid === undefined) {
+    return selectBuildToken(tokens);
+  });
+
+/**
+ * Registers the stack's API token as the build token `alchemy-<stack name>`,
+ * with the token id from GET /user/tokens/verify. Workers Builds accepts
+ * only API tokens, so an OAuth login or a global API key fails with
+ * {@link WorkersBuildsError}. Destroy keeps the build token: it belongs to
+ * the account, and other configurations can use it.
+ */
+const registerBuildToken = (accountId: string) =>
+  Effect.gen(function* () {
+    const operation = "register build token";
+    const credentials = yield* yield* Credentials;
+    if (credentials.type !== "apiToken") {
       return yield* new WorkersBuildsError({
-        operation: "select build token",
-        message: `Account ${accountId} has no Workers Builds token. Connect any Worker to Git once in the Cloudflare dashboard, which creates one, or pass buildToken.`,
+        operation,
+        message: `Account ${accountId} has no Workers Builds token, and the stack's Cloudflare credentials are not an API token, so the provider cannot register one. Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID, pass buildToken, or connect any Worker to Git once in the Cloudflare dashboard, which creates one.`,
       });
     }
-    return uuid;
+    const { id } = yield* user.verifyToken({}).pipe(refused("verify API token"));
+    // The request holds the token secret; never log it.
+    const registered = yield* workersBuilds
+      .createToken({
+        accountId,
+        buildTokenName: `alchemy-${yield* StackName}`,
+        buildTokenSecret: Redacted.value(credentials.apiToken),
+        cloudflareTokenId: id,
+      })
+      .pipe(refused(operation));
+    if (!registered.buildTokenUuid) {
+      return yield* new WorkersBuildsError({
+        operation,
+        message: `${operation}: the result has no build_token_uuid`,
+      });
+    }
+    return registered.buildTokenUuid;
   });
 
 const gitHubToken = Config.Redacted("GITHUB_TOKEN").pipe(
