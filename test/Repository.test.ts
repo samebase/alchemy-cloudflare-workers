@@ -3,18 +3,24 @@ import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
 import * as HttpClient from "effect/http/HttpClient";
 import type * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import type * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { describe, expect, it } from "vitest";
 import { WorkersBuildsError } from "../src/Api.ts";
 import {
   createBody,
+  currentRepository,
   diffRepository,
+  type GitHubRepository,
   GitHubRepositoryResponse,
   type RepositoryAttributes,
   type RepositoryProps,
-  resolveRepositoryIds,
+  resolveRepository,
   selectBuildToken,
   triggerAttributes,
   updateBody,
@@ -29,14 +35,25 @@ const legacy = Schema.decodeUnknownSync(WorkerBuilds)(
   fixture("cloudflare/builds_workers_get_legacy.json"),
 );
 
+const repository: GitHubRepository = {
+  owner: "samebase-live-tests",
+  name: "tmp-plugin-review-9806-20260905-1434",
+  branch: "main",
+};
+
 const props: RepositoryProps = {
   worker: legacy.script_tag,
-  repository: {
-    owner: "samebase-live-tests",
-    name: "tmp-plugin-review-9806-20260905-1434",
-    branch: "main",
-  },
+  repository,
   buildCommand: "pnpm run build",
+};
+
+/** The repository of the recorded GitHub payload, as `resolveRepository` returns it. */
+const resolved = {
+  owner: "samebase-live-tests",
+  name: "tmp-plugin-review-9806-20260905-1434",
+  branch: "main",
+  ownerId: 315958746,
+  repositoryId: 1358278395,
 };
 
 describe("WorkerBuilds", () => {
@@ -57,7 +74,7 @@ describe("createBody", () => {
     const body = createBody({
       scriptTag: legacy.script_tag,
       props,
-      ids: { ownerId: "315958746", repositoryId: "1358278395" },
+      repository: resolved,
       buildToken: legacy.production_settings.build_token_uuid,
     });
     const settings = {
@@ -93,7 +110,7 @@ describe("createBody", () => {
         variables: { GREETING: "hello", CONVEX_DEPLOY_KEY: Redacted.make("prod-key") },
         previewVariables: { CONVEX_DEPLOY_KEY: Redacted.make("preview-key") },
       },
-      ids: { ownerId: "315958746", repositoryId: "1358278395" },
+      repository: resolved,
       buildToken: legacy.production_settings.build_token_uuid,
     });
     expect(body.production_settings.environment_variables).toEqual({
@@ -118,6 +135,7 @@ describe("updateBody", () => {
         previewVariables: { PREVIEW_ONLY: "3" },
       },
       news: { ...props, variables: { KEEP: "1" } },
+      branch: "main",
       buildToken,
     });
     expect(body.production_settings.environment_variables).toEqual({
@@ -132,7 +150,7 @@ describe("updateBody", () => {
   });
 
   it("removes nothing without previous props, such as after --adopt", () => {
-    const body = updateBody({ olds: undefined, news: props, buildToken });
+    const body = updateBody({ olds: undefined, news: props, branch: "main", buildToken });
     expect(body.production_settings.environment_variables).toEqual({});
     expect(body.previews_base_config.environment_variables).toEqual({});
   });
@@ -142,7 +160,6 @@ describe("updateBody", () => {
       olds: props,
       news: {
         ...props,
-        repository: { ...props.repository, branch: "release" },
         deployCommand: "pnpm run deploy",
         previewDeployCommand: "pnpm run deploy:preview",
         rootDirectory: "apps/web",
@@ -150,6 +167,7 @@ describe("updateBody", () => {
         buildCachingEnabled: false,
         previews: false,
       },
+      branch: "release",
       buildToken,
     });
     expect(body).toMatchObject({
@@ -177,8 +195,8 @@ describe("diffRepository", () => {
 
   it.each([
     ["another Worker", { ...props, worker: "eaeec9c35fa64976a823c246164f4204" }],
-    ["another owner", { ...props, repository: { ...props.repository, owner: "samebase" } }],
-    ["another repository", { ...props, repository: { ...props.repository, name: "other" } }],
+    ["another owner", { ...props, repository: { ...repository, owner: "samebase" } }],
+    ["another repository", { ...props, repository: { ...repository, name: "other" } }],
   ])("replaces the configuration for %s", (_, news) => {
     expect(diffRepository({ olds: props, news, output, accountId })).toEqual({
       action: "replace",
@@ -186,14 +204,29 @@ describe("diffRepository", () => {
   });
 
   it("replaces the configuration for another repository id, and only then", () => {
-    const pinned = { ...props, repository: { ...props.repository, repositoryId: 1358278395 } };
-    const other = { ...props, repository: { ...props.repository, repositoryId: 1 } };
+    const pinned = { ...props, repository: { ...repository, repositoryId: 1358278395 } };
+    const other = { ...props, repository: { ...repository, repositoryId: 1 } };
     expect(diffRepository({ olds: pinned, news: other, output, accountId })).toEqual({
       action: "replace",
     });
     expect(diffRepository({ olds: props, news: pinned, output, accountId })).toBeUndefined();
-    const renamed = { ...props, repository: { ...props.repository, owner: "Samebase-Live-Tests" } };
+    const renamed = { ...props, repository: { ...repository, owner: "Samebase-Live-Tests" } };
     expect(diffRepository({ olds: props, news: renamed, output, accountId })).toBeUndefined();
+  });
+
+  it("updates a renamed repository: the same id under another owner and name", () => {
+    const pinned = { ...props, repository: { ...repository, repositoryId: 1358278395 } };
+    const renamed = {
+      ...props,
+      repository: { owner: "samebase", name: "renamed", branch: "main", repositoryId: 1358278395 },
+    };
+    expect(diffRepository({ olds: pinned, news: renamed, output, accountId })).toBeUndefined();
+  });
+
+  it("leaves a repository that one side does not name to reconcile", () => {
+    const { repository: _, ...current } = props;
+    expect(diffRepository({ olds: props, news: current, output, accountId })).toBeUndefined();
+    expect(diffRepository({ olds: current, news: props, output, accountId })).toBeUndefined();
   });
 
   it("replaces the configuration for another account", () => {
@@ -210,7 +243,7 @@ describe("diffRepository", () => {
   it("leaves branch, command, variable, and previews changes to the engine as updates", () => {
     const news: RepositoryProps = {
       ...props,
-      repository: { ...props.repository, branch: "release" },
+      repository: { ...repository, branch: "release" },
       buildCommand: "npm run build",
       variables: { GREETING: Redacted.make("hi") },
       previews: false,
@@ -269,58 +302,191 @@ const serve = (respond: (request: HttpClientRequest.HttpClientRequest) => Respon
   return { requests, client };
 };
 
-const resolveWith = (
-  client: HttpClient.HttpClient,
-  env: Record<string, string>,
-  repository: RepositoryProps["repository"] = props.repository,
+/** A git that prints `stdout` for every command and records the commands. */
+const git = (stdout: string) => {
+  const commands: ChildProcess.Command[] = [];
+  const spawner = ChildProcessSpawner.make((command) => {
+    commands.push(command);
+    return Effect.succeed(
+      ChildProcessSpawner.makeHandle({
+        pid: ChildProcessSpawner.ProcessId(1),
+        exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+        isRunning: Effect.succeed(false),
+        kill: () => Effect.void,
+        stdin: Sink.drain,
+        stdout: Stream.make(new TextEncoder().encode(stdout)),
+        stderr: Stream.empty,
+        all: Stream.empty,
+        getInputFd: () => Sink.drain,
+        getOutputFd: () => Stream.empty,
+        unref: Effect.succeed(Effect.void),
+      }),
+    );
+  });
+  return { commands, spawner };
+};
+
+const run = <A, E>(
+  effect: Effect.Effect<A, E, HttpClient.HttpClient | ChildProcessSpawner.ChildProcessSpawner>,
+  input: {
+    readonly github: ReturnType<typeof serve>;
+    readonly env?: Record<string, string>;
+    readonly origin?: ChildProcessSpawner.ChildProcessSpawner["Service"];
+  },
 ) =>
-  resolveRepositoryIds(repository).pipe(
-    Effect.provideService(HttpClient.HttpClient, client),
-    Effect.provideService(ConfigProvider.ConfigProvider, ConfigProvider.fromUnknown(env)),
+  effect.pipe(
+    Effect.provideService(HttpClient.HttpClient, input.github.client),
+    Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, input.origin ?? git("").spawner),
+    Effect.provideService(
+      ConfigProvider.ConfigProvider,
+      ConfigProvider.fromUnknown(input.env ?? {}),
+    ),
   );
 
-describe("resolveRepositoryIds", () => {
+const recordedRepository = () => serve(() => Response.json(fixture("github/repos_get.json")));
+
+const recordedUrl =
+  "https://api.github.com/repos/samebase-live-tests/tmp-plugin-review-9806-20260905-1434";
+
+describe("resolveRepository", () => {
   it("decodes the recorded GitHub payload", () => {
     const parsed = Schema.decodeUnknownSync(GitHubRepositoryResponse)(
       fixture("github/repos_get.json"),
     );
-    expect(parsed).toEqual({ id: 1358278395, owner: { id: 315958746 } });
+    expect(parsed).toEqual({
+      id: 1358278395,
+      name: "tmp-plugin-review-9806-20260905-1434",
+      default_branch: "main",
+      owner: { id: 315958746, login: "samebase-live-tests" },
+    });
   });
 
   it("reads the ids that the recorded Builds configuration of the same repository holds", async () => {
-    const github = serve(() => Response.json(fixture("github/repos_get.json")));
-    const ids = await Effect.runPromise(resolveWith(github.client, {}));
-    expect(ids).toEqual({ ownerId: "315958746", repositoryId: "1358278395" });
-    const raw = fixture("cloudflare/builds_workers_get_legacy.json");
-    expect(raw).toMatchObject({
-      git_repository: { provider_account_id: ids.ownerId, repo_id: ids.repositoryId },
+    const github = recordedRepository();
+    const target = await Effect.runPromise(run(resolveRepository(repository), { github }));
+    expect(target).toEqual(resolved);
+    expect(fixture("cloudflare/builds_workers_get_legacy.json")).toMatchObject({
+      git_repository: {
+        provider_account_id: String(target.ownerId),
+        repo_id: String(target.repositoryId),
+      },
     });
-    expect(github.requests[0]?.url).toBe(
-      "https://api.github.com/repos/samebase-live-tests/tmp-plugin-review-9806-20260905-1434",
-    );
+    expect(github.requests[0]?.url).toBe(recordedUrl);
     expect(github.requests[0]?.headers["authorization"]).toBeUndefined();
   });
 
+  it("takes the default branch from the same GitHub call when branch is absent", async () => {
+    const github = recordedRepository();
+    const { branch: _, ...ids } = resolved;
+    const target = await Effect.runPromise(run(resolveRepository(ids), { github }));
+    expect(target).toEqual(resolved);
+    expect(github.requests).toHaveLength(1);
+  });
+
+  it("keeps the branch and the ids that the props hold over GitHub's", async () => {
+    const github = recordedRepository();
+    const target = await Effect.runPromise(
+      run(resolveRepository({ ...repository, branch: "release", repositoryId: 2 }), { github }),
+    );
+    expect(target).toEqual({ ...resolved, branch: "release", repositoryId: 2 });
+  });
+
   it("sends GITHUB_ACCESS_TOKEN when GITHUB_TOKEN is not set", async () => {
-    const github = serve(() => Response.json(fixture("github/repos_get.json")));
-    await Effect.runPromise(resolveWith(github.client, { GITHUB_ACCESS_TOKEN: "test-token" }));
+    const github = recordedRepository();
+    await Effect.runPromise(
+      run(resolveRepository(repository), { github, env: { GITHUB_ACCESS_TOKEN: "test-token" } }),
+    );
     expect(github.requests[0]?.headers["authorization"]).toBe("Bearer test-token");
   });
 
-  it("skips GitHub when the props hold both ids", async () => {
+  it("skips GitHub when the props hold both ids and the branch", async () => {
     const github = serve(() => new Response(null, { status: 500 }));
-    const ids = await Effect.runPromise(
-      resolveWith(github.client, {}, { ...props.repository, ownerId: 1, repositoryId: 2 }),
+    const target = await Effect.runPromise(
+      run(resolveRepository({ ...repository, ownerId: 1, repositoryId: 2 }), { github }),
     );
-    expect(ids).toEqual({ ownerId: "1", repositoryId: "2" });
+    expect(target).toEqual({ ...repository, ownerId: 1, repositoryId: 2 });
     expect(github.requests).toHaveLength(0);
   });
 
-  it("names the token and the id props when GitHub hides the repository", async () => {
+  it("names the token and the props when GitHub hides the repository", async () => {
     const github = serve(() => Response.json({ message: "Not Found" }, { status: 404 }));
-    const error = await Effect.runPromise(Effect.flip(resolveWith(github.client, {})));
+    const error = await Effect.runPromise(
+      Effect.flip(run(resolveRepository(repository), { github })),
+    );
     expect(error).toBeInstanceOf(WorkersBuildsError);
     expect(error.message).toContain("GITHUB_TOKEN");
     expect(error.message).toContain("repository.repositoryId");
+  });
+
+  it("uses the current repository without repository props", async () => {
+    const github = recordedRepository();
+    const origin = git(
+      "git@github.com:samebase-live-tests/tmp-plugin-review-9806-20260905-1434.git\n",
+    );
+    const target = await Effect.runPromise(
+      run(resolveRepository(undefined), { github, origin: origin.spawner }),
+    );
+    expect(target).toEqual(resolved);
+    expect(github.requests.map((request) => request.url)).toEqual([recordedUrl]);
+  });
+});
+
+describe("currentRepository", () => {
+  const current = {
+    owner: "samebase-live-tests",
+    name: "tmp-plugin-review-9806-20260905-1434",
+    defaultBranch: "main",
+    ownerId: 315958746,
+    repositoryId: 1358278395,
+  };
+
+  it("takes GITHUB_REPOSITORY in GitHub Actions and never runs git", async () => {
+    const github = recordedRepository();
+    const origin = git("https://github.com/samebase/alchemy-cloudflare-workers.git\n");
+    const env = {
+      GITHUB_ACTIONS: "true",
+      GITHUB_SHA: "6e532269f4bd1e8e0a2a5c9e2d4f6b8a0c1e3f5a",
+      GITHUB_REPOSITORY_OWNER: "samebase-live-tests",
+      GITHUB_REPOSITORY: "samebase-live-tests/tmp-plugin-review-9806-20260905-1434",
+    };
+    const result = await Effect.runPromise(
+      run(currentRepository, { github, env, origin: origin.spawner }),
+    );
+    expect(result).toEqual(current);
+    expect(origin.commands).toHaveLength(0);
+    expect(github.requests[0]?.url).toBe(recordedUrl);
+  });
+
+  it.each([
+    "https://github.com/samebase-live-tests/tmp-plugin-review-9806-20260905-1434",
+    "https://github.com/samebase-live-tests/tmp-plugin-review-9806-20260905-1434.git",
+    "git@github.com:samebase-live-tests/tmp-plugin-review-9806-20260905-1434",
+    "git@github.com:samebase-live-tests/tmp-plugin-review-9806-20260905-1434.git",
+  ])("reads the owner and the name from the origin remote %s", async (url) => {
+    const github = recordedRepository();
+    const origin = git(`${url}\n`);
+    const result = await Effect.runPromise(
+      run(currentRepository, { github, origin: origin.spawner }),
+    );
+    expect(result).toEqual(current);
+    expect(origin.commands).toMatchObject([
+      { command: "git", args: ["remote", "get-url", "origin"] },
+    ]);
+    expect(github.requests[0]?.url).toBe(recordedUrl);
+  });
+
+  it.each([
+    ["no origin remote", ""],
+    ["an origin remote on another host", "git@gitlab.com:samebase-live-tests/app.git\n"],
+  ])("fails with one WorkersBuildsError for %s", async (_, stdout) => {
+    const github = recordedRepository();
+    const origin = git(stdout);
+    const error = await Effect.runPromise(
+      Effect.flip(run(currentRepository, { github, origin: origin.spawner })),
+    );
+    expect(error).toBeInstanceOf(WorkersBuildsError);
+    expect(error).toMatchObject({ operation: "find GitHub repository" });
+    expect(error.message).not.toContain("gitlab.com");
+    expect(github.requests).toHaveLength(0);
   });
 });
