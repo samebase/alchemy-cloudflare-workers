@@ -190,10 +190,14 @@ pnpm run test:live        # real API calls, see below
 Unit tests run against recorded Cloudflare and GitHub payloads in `test/fixtures/`. They make no
 network calls.
 
-Live tests need `ALCHEMY_WORKERS_BUILDS_LIVE=1`, `CLOUDFLARE_API_TOKEN` with the permissions
-above, and a GitHub repository that the Cloudflare GitHub App can read. The defaults are in
-`test/live/env.ts`. The tests create resources named `tmp-alchemy-workers-builds-*` and remove
-them again.
+Live tests run only with `ALCHEMY_WORKERS_BUILDS_LIVE=1`:
+
+- `permission.live.test.ts` needs only the network. It runs a plan through the Alchemy engine with
+  a placeholder token and expects `WorkersBuildsPermissionError`.
+- `workers-builds.live.test.ts` needs `CLOUDFLARE_API_TOKEN` with the permissions above and a
+  GitHub repository that the Cloudflare GitHub App can read. The defaults are in
+  `test/live/env.ts`. It creates resources named `tmp-alchemy-workers-builds-*` and removes them
+  again.
 
 Releases: push a `v*` tag; `.github/workflows/release.yml` publishes with npm trusted publishing.
 
