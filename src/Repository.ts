@@ -6,18 +6,27 @@
 // preview deploy command on every other branch. This resource never deletes
 // the Worker.
 //
-// The diff of this resource never replaces it. Workers Builds keeps one
-// configuration per Worker, and Alchemy creates a replacement before it
-// deletes the old resource. So a replacement for the same Worker would update
-// the configuration and then delete it. Reconcile changes the one
-// configuration in place instead, also for another repository or Worker.
+// The diff never replaces the configuration of the same Worker. Workers
+// Builds keeps one configuration per Worker, and Alchemy creates a
+// replacement before it deletes the old resource. So a replacement for the
+// same Worker would update the configuration and then delete it. Reconcile
+// changes the one configuration in place instead, also for another
+// repository. Only another Worker or account, which is another configuration,
+// is a replacement: then the order is safe, and Alchemy keeps the removal
+// policy and tracks both configurations until it deletes the old one.
 import { Credentials } from "@distilled.cloud/cloudflare/Credentials";
 import * as user from "@distilled.cloud/cloudflare/user";
 import * as workersBuilds from "@distilled.cloud/cloudflare/workers_builds";
 import { Resource } from "alchemy";
 import { Unowned } from "alchemy/AdoptPolicy";
 import { Artifacts } from "alchemy/Artifacts";
-import { deepEqual, havePropsChanged, isResolved, type UpdateDiff } from "alchemy/Diff";
+import {
+  deepEqual,
+  havePropsChanged,
+  isResolved,
+  type ReplaceDiff,
+  type UpdateDiff,
+} from "alchemy/Diff";
 import { GitHubEnv } from "alchemy/GitHub";
 import * as Provider from "alchemy/Provider";
 import { StackName } from "alchemy/Stack";
@@ -186,9 +195,10 @@ type RepositoryAttributesBefore05 = Omit<
  * The Workers Builds configuration that connects a GitHub repository to a
  * Worker.
  *
- * A change is always an update of the one configuration, never a
- * replacement. Another repository or Worker deletes the old triggers and
- * configuration in the same deploy.
+ * A change for the same Worker is an update of the one configuration,
+ * never a replacement. Another repository deletes the old triggers and
+ * configuration in the same deploy. Another Worker or account is a
+ * replacement.
  *
  * Destroy removes the triggers and the build configuration. It keeps the
  * Worker and the repository connection: Cloudflare shares one connection
@@ -410,20 +420,22 @@ const settingsDiffer = (
 };
 
 /**
- * Update or no change; never a replacement (see the top of this file).
+ * Another Worker or account is a replacement: another configuration, which
+ * Alchemy creates before it deletes the old one. For the same Worker and
+ * account, the result is an update or no change, never a replacement (see
+ * the top of this file).
  *
  * `target` is the repository that `news` resolve to, with its GitHub ids,
  * and `output.repository` is the repository that the configuration builds
  * from. Only the repository id counts: GitHub keeps it when a repository
  * gets a new name or owner, and Workers Builds keeps the old names. Another
- * id, branch, Worker, or account, changed props, or saved settings that
- * differ from the props are an update. State from 0.4 has no repository and
- * no settings in its attributes, so the first plan after the upgrade is an
- * update, which saves them.
+ * id or branch, changed props, or saved settings that differ from the props
+ * are an update. State from 0.4 has no repository and no settings in its
+ * attributes, so the first plan after the upgrade is an update, which saves
+ * them.
  *
- * `stables` names the attributes that the update keeps: the Worker tag and
- * the account unless the configuration moves, and the repository connection
- * unless the repository changes.
+ * `stables` names the attributes that the update keeps: the Worker tag, the
+ * account, and the repository connection unless the repository changes.
  */
 export const diffRepository = (input: {
   readonly olds: RepositoryProps;
@@ -431,13 +443,14 @@ export const diffRepository = (input: {
   readonly output: RepositoryAttributes | RepositoryAttributesBefore05;
   readonly accountId: string;
   readonly target: Required<GitHubRepository>;
-}): UpdateDiff | undefined => {
+}): UpdateDiff | ReplaceDiff | undefined => {
   const { olds, news, output, target } = input;
+  if (output.scriptTag !== news.worker || output.accountId !== input.accountId) {
+    return { action: "replace" };
+  }
   const saved = "repository" in output ? output : undefined;
-  const moved = output.scriptTag !== news.worker || output.accountId !== input.accountId;
   const sameRepository = saved?.repository.repositoryId === target.repositoryId;
   const changed =
-    moved ||
     saved === undefined ||
     !sameRepository ||
     saved.repository.branch !== target.branch ||
@@ -458,11 +471,9 @@ export const diffRepository = (input: {
   if (!changed) return undefined;
   return {
     action: "update",
-    stables: moved
-      ? []
-      : sameRepository
-        ? ["scriptTag", "repoConnectionId", "accountId"]
-        : ["scriptTag", "accountId"],
+    stables: sameRepository
+      ? ["scriptTag", "repoConnectionId", "accountId"]
+      : ["scriptTag", "accountId"],
   };
 };
 
@@ -509,7 +520,9 @@ export const RepositoryProvider = () =>
     diff: Effect.fn(function* ({ olds, news, output }) {
       // Unresolved props, such as the tag of a Worker that the same deploy
       // replaces, and an interrupted create: the engine updates when any
-      // prop changed. It compares Redacted variable values by content.
+      // prop changed. It compares Redacted variable values by content. An
+      // unresolved tag is never a replacement: it can resolve to the same
+      // Worker, such as a Worker that a renamed logical id adopts.
       if (!isResolved(news) || output === undefined) return undefined;
       return diffRepository({
         olds,
@@ -535,8 +548,16 @@ export const RepositoryProvider = () =>
       const path = `/accounts/${accountId}/builds/workers/${scriptTag}`;
       const repository = yield* resolveRepositoryOnce(news.repository);
       let builds = yield* getBuilds(accountId, scriptTag);
-      // Kept when the configuration is created again for another repository.
-      const buildToken = news.buildToken ?? builds?.production_settings.build_token_uuid;
+      // The configuration of this Worker that the state holds, if any. State
+      // from 0.4 has no settings.
+      const own =
+        output?.scriptTag === scriptTag && output.accountId === accountId ? output : undefined;
+      // The token of the configuration, also when it is created again for
+      // another repository, or after such a create failed.
+      const buildToken =
+        news.buildToken ??
+        builds?.production_settings.build_token_uuid ??
+        (own !== undefined && "production" in own ? own.production.buildToken : undefined);
 
       if (
         builds !== undefined &&
@@ -547,11 +568,7 @@ export const RepositoryProvider = () =>
         // Only a configuration that this resource wrote for this Worker
         // moves to another repository. An adopted configuration, or one
         // that an interrupted create found, belongs to someone else.
-        if (
-          olds === undefined ||
-          output?.scriptTag !== scriptTag ||
-          output.accountId !== accountId
-        ) {
+        if (olds === undefined || own === undefined) {
           return yield* new WorkersBuildsError({
             operation: "check Workers Builds repository",
             message: `Worker ${scriptTag} builds from ${from}, not ${to}. Disconnect it in the Cloudflare dashboard first.`,
@@ -628,18 +645,6 @@ export const RepositoryProvider = () =>
         path,
         result: WorkerBuilds,
       });
-
-      // The configuration moved to another Worker or account, such as when
-      // the Worker was replaced. The engine does not delete the old
-      // configuration, because this resource is never replaced, so this
-      // reconcile does, after the new configuration exists.
-      if (
-        olds !== undefined &&
-        output !== undefined &&
-        (output.scriptTag !== scriptTag || output.accountId !== accountId)
-      ) {
-        yield* deleteConfiguration(output.accountId, output.scriptTag);
-      }
       return yield* attributesOf(accountId, saved);
     }),
 

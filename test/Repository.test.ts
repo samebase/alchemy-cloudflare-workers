@@ -260,8 +260,8 @@ describe("diffRepository", () => {
     ).toEqual(keepsAll);
   });
 
-  it("updates, and never replaces, for another Worker or account", () => {
-    const moved = { action: "update", stables: [] };
+  it("replaces for another Worker or account, which is another configuration", () => {
+    const moved = { action: "replace" };
     expect(diff({ ...props, worker: "eaeec9c35fa64976a823c246164f4204" })).toEqual(moved);
     expect(
       diffRepository({

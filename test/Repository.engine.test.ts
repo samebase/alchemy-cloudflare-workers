@@ -1,6 +1,7 @@
 // WorkersBuilds.Repository through the real Alchemy engine over the fake API
 // in engine.ts: the requests that a deploy sends, and the configuration that
 // Workers Builds holds after it.
+import * as RemovalPolicy from "alchemy/RemovalPolicy";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
 import { describe, expect, it } from "vitest";
@@ -12,6 +13,7 @@ import {
   fakeApi,
   type GitHubRepository,
   recordedRepository,
+  registeredBuildToken,
 } from "./engine.ts";
 
 const scriptTag = "3717c592bb564236a6815df01f084963";
@@ -146,11 +148,15 @@ describe("another repository for the same Worker", () => {
 });
 
 describe("another Worker", () => {
-  it("creates the configuration of the new Worker, then deletes the old one", async () => {
+  const moved = "eaeec9c35fa64976a823c246164f4204";
+
+  it("replaces: creates the configuration of the new Worker, then deletes the old one", async () => {
     const api = github();
     const deploy = engine(api);
-    const moved = "eaeec9c35fa64976a823c246164f4204";
     await deploy.deploy(stack(byName(recorded)));
+    expect((await deploy.plan(stack(byName(recorded), moved))).resources["Builds"]?.action).toBe(
+      "replace",
+    );
     api.requests.length = 0;
 
     const second = await deploy.deploy(stack(byName(recorded), moved));
@@ -162,6 +168,90 @@ describe("another Worker", () => {
     expect(created).toBeGreaterThan(-1);
     expect(deleted).toBeGreaterThan(created);
     expect(api.triggers.get(scriptTag)).toEqual([]);
+  });
+
+  it("keeps the old configuration when the resource is retained", async () => {
+    const api = github();
+    const deploy = engine(api);
+    const retained = (worker: string) =>
+      stack(byName(recorded), worker).pipe(RemovalPolicy.retain());
+    await deploy.deploy(retained(scriptTag));
+
+    await deploy.deploy(retained(moved));
+
+    expect([...api.configurations.keys()].sort()).toEqual([scriptTag, moved].sort());
+    expect(api.requests.some((request) => request.startsWith("DELETE"))).toBe(false);
+  });
+
+  it("updates, and never deletes the new configuration, when the same deploy replaces the Worker", async () => {
+    const api = github();
+    const deploy = engine(api);
+    const program = (name: string) =>
+      Effect.gen(function* () {
+        const worker = yield* WorkersBuilds.Worker("Worker", { name });
+        const builds = yield* WorkersBuilds.Repository("Builds", {
+          worker: worker.workerId,
+          repository: byName(recorded),
+          buildCommand: "pnpm run build",
+          buildToken,
+        });
+        return { workerId: worker.workerId, scriptTag: builds.scriptTag };
+      });
+    const first = await deploy.deploy(program("old-app"));
+    // The plan cannot know the tag of the new Worker, so it is no replacement.
+    expect((await deploy.plan(program("new-app"))).resources["Builds"]?.action).toBe("update");
+
+    const second = await deploy.deploy(program("new-app"));
+
+    expect(second.workerId).not.toBe(first.workerId);
+    expect(second.scriptTag).toBe(second.workerId);
+    expect(api.configurations.get(second.workerId)?.git_repository.repo_id).toBe(
+      String(recorded.id),
+    );
+    expect(api.requests).not.toContain(`DELETE /builds/workers/${second.workerId}`);
+    // Alchemy deleted the old Worker; the provider left its configuration.
+    expect(api.workers.has(first.workerId)).toBe(false);
+  });
+});
+
+describe("a failed create after the old configuration was deleted", () => {
+  it("keeps the saved build token when the next deploy creates the configuration", async () => {
+    const api = github();
+    const saved = registeredBuildToken();
+    api.buildTokens.push(saved);
+    const deploy = engine(api);
+    const unpinned = (repository: WorkersBuilds.GitHubRepository) =>
+      Effect.gen(function* () {
+        const builds = yield* WorkersBuilds.Repository("Builds", {
+          worker: scriptTag,
+          repository,
+          buildCommand: "pnpm run build",
+        });
+        return { scriptTag: builds.scriptTag };
+      });
+    await deploy.deploy(unpinned(byName(recorded)));
+    expect(api.configurations.get(scriptTag)?.production_settings.build_token_uuid).toBe(
+      saved.build_token_uuid,
+    );
+    // A newer build token, which the account picks first for a new configuration.
+    api.buildTokens.push({
+      ...saved,
+      build_token_name: "zz-newer",
+      build_token_uuid: "37ba157d-9fb1-4cf9-8382-4d9fe7d69816",
+    });
+
+    api.failures.add("POST /builds/workers");
+    const failed = await deploy.deploy(unpinned(byName(other))).then(
+      () => undefined,
+      (failure: unknown) => String(failure),
+    );
+    expect(failed).toContain("Injected failure");
+    expect(api.configurations.has(scriptTag)).toBe(false);
+
+    await deploy.deploy(unpinned(byName(other)));
+    const configuration = api.configurations.get(scriptTag);
+    expect(configuration?.git_repository.repo_id).toBe(String(other.id));
+    expect(configuration?.production_settings.build_token_uuid).toBe(saved.build_token_uuid);
   });
 });
 

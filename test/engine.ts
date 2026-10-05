@@ -171,6 +171,18 @@ const recordedWorker = () =>
   Schema.decodeUnknownSync(StoredWorker)(fixture("cloudflare/workers_workers_get.json"));
 
 const missingConfiguration = () => fixture("cloudflare/builds_workers_get_missing_error.json");
+
+const BuildToken = Schema.Struct({
+  build_token_name: Schema.String,
+  build_token_uuid: Schema.String,
+  cloudflare_token_id: Schema.String,
+  owner_type: Schema.String,
+});
+export type BuildToken = typeof BuildToken.Type;
+
+/** The build token of the spec-derived create result, as a list item. */
+export const registeredBuildToken = () =>
+  Schema.decodeUnknownSync(BuildToken)(fixture("cloudflare/builds_tokens_create.json"));
 const missingWorker = () => fixture("cloudflare/workers_scripts_not_found_error.json");
 
 const success = (result: unknown) =>
@@ -228,6 +240,10 @@ export const fakeApi = () => {
   const triggers = new Map<string, readonly Trigger[]>();
   const workers = new Map<string, StoredWorker>();
   const repositories = new Map<string, GitHubRepository>();
+  /** The account's build tokens, which GET /builds/tokens lists. */
+  const buildTokens: BuildToken[] = [];
+  /** Requests, as `METHOD path`, that fail once with an error envelope. */
+  const failures = new Set<string>();
   let sequence = 0;
 
   const addRepository = (repository: GitHubRepository) => {
@@ -376,7 +392,20 @@ export const fakeApi = () => {
         : Response.json(repository);
     }
     const path = url.pathname.startsWith(api) ? url.pathname.slice(api.length) : url.pathname;
-    requests.push(`${request.method} ${path}`);
+    const call = `${request.method} ${path}`;
+    requests.push(call);
+    if (failures.delete(call)) {
+      return Response.json(
+        {
+          success: false,
+          errors: [{ code: 10000, message: "Injected failure" }],
+          messages: [],
+          result: null,
+        },
+        { status: 500 },
+      );
+    }
+    if (path === "/builds/tokens" && request.method === "GET") return success(buildTokens);
     return (
       builds(request.method, path, request) ??
       workerApi(request.method, path, request) ??
@@ -396,7 +425,17 @@ export const fakeApi = () => {
     Effect.sync(() => HttpClientResponse.fromWeb(request, respond(request))),
   );
 
-  return { requests, configurations, triggers, workers, repositories, addRepository, client };
+  return {
+    requests,
+    configurations,
+    triggers,
+    workers,
+    repositories,
+    buildTokens,
+    failures,
+    addRepository,
+    client,
+  };
 };
 export type FakeApi = ReturnType<typeof fakeApi>;
 

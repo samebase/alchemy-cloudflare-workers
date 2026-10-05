@@ -230,7 +230,7 @@ Calls `GET`, `POST`, `PATCH`, and `DELETE /accounts/{account_id}/builds/workers[
 
 | Prop                                  | Default                   | Change                                          |
 | ------------------------------------- | ------------------------- | ----------------------------------------------- |
-| `worker`                              | required                  | update, see Another Worker below                |
+| `worker`                              | required                  | replace, see Another Worker below               |
 | `repository`                          | the repository of the run | see [Without `repository`](#without-repository) |
 | `repository.owner`, `.name`           | required in `repository`  | update, see Renames below                       |
 | `repository.branch`                   | default branch on GitHub  | update                                          |
@@ -252,9 +252,10 @@ Outputs: `scriptTag`, `repoConnectionId`, `triggerIds`, `previewsEnabled`, `acco
 production branch), and `production` and `preview` (the build settings). See
 [What drift detection sees](#what-drift-detection-sees).
 
-- Never replaced: every change is an update of the one configuration. Workers Builds keeps one
-  configuration per Worker, and Alchemy creates a replacement before it deletes the old resource.
-  A replacement for the same Worker would update the configuration and then delete it.
+- No replacement for the same Worker: every change is an update of the one configuration. Workers
+  Builds keeps one configuration per Worker, and Alchemy creates a replacement before it deletes
+  the old resource. A replacement for the same Worker would update the configuration and then
+  delete it.
 - GitHub ids: Workers Builds addresses a repository by its numeric GitHub ids. Without `ownerId`,
   `repositoryId`, and `branch`, the provider reads them from the GitHub API with `GITHUB_TOKEN` or
   `GITHUB_ACCESS_TOKEN`, or without a token for a public repository. The plan reads them once per
@@ -268,8 +269,12 @@ production branch), and `production` and `preview` (the build settings). See
   that order. The new configuration keeps the build token. Variables that someone else added are
   gone. If the create fails, the next deploy creates the configuration. Only an explicit
   `repository` prop moves the builds to another repository.
-- Another Worker: another `worker`, such as after a replacement of the Worker, creates the
-  configuration for the new Worker, and then deletes the configuration of the old Worker.
+- Another Worker: another `worker` or account replaces the resource. That is another
+  configuration, so Alchemy creates it and then deletes the old one. `Alchemy.RemovalPolicy.retain()`
+  keeps the old one. When the same deploy replaces the `WorkersBuilds.Worker`, the plan does not
+  know the new Worker tag yet. Then the deploy updates the resource: it creates the configuration
+  of the new Worker and does not delete the configuration of the old Worker. Alchemy then deletes
+  the old Worker, unless it is retained.
 - Build token: Workers Builds deploys with the API token behind a build token. Without
   `buildToken`, a new configuration uses the account's first build token (by name, newest first),
   and an existing configuration keeps its token. If the account has no build token, the provider

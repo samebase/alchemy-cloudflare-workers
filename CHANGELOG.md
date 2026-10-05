@@ -2,18 +2,21 @@
 
 ## 0.5.0
 
-`WorkersBuilds.Repository` is never replaced, and drift detection sees the settings that the
-resources own.
+`WorkersBuilds.Repository` is no longer replaced for the same Worker, and drift detection sees the
+settings that the resources own.
 
 - `WorkersBuilds.Repository`: a renamed repository no longer deletes the Builds configuration.
   Before, a new name without the GitHub ids on both sides was a replacement. Alchemy creates
   before it deletes, so the deploy updated the configuration of the same Worker and then deleted
   it. The deploy reported success, but the Worker had no automatic builds.
-- `WorkersBuilds.Repository`: the diff never replaces the resource. The plan reads the GitHub ids
-  of the repository (once per deploy) and compares the repository id with the one that the
-  configuration builds from. The same id is an update. Another repository id is also an update:
-  the deploy deletes the triggers and the configuration, then creates the configuration for the
-  new repository. Another `worker` creates the new configuration, then deletes the old one.
+- `WorkersBuilds.Repository`: the diff never replaces the configuration of the same Worker. The
+  plan reads the GitHub ids of the repository (once per deploy) and compares the repository id
+  with the one that the configuration builds from. The same id is an update. Another repository id
+  is also an update: the deploy deletes the triggers and the configuration, then creates the
+  configuration for the new repository. Without `buildToken`, the new configuration keeps the
+  saved build token, also when a deploy retries a failed create.
+- `WorkersBuilds.Repository`: another `worker` or account is still a replacement, as in 0.4. That
+  is another configuration, so the order is safe, and `RemovalPolicy.retain()` keeps the old one.
 - `WorkersBuilds.Repository`: only an explicit `repository` prop moves the builds to another
   repository. When the repository of the run differs from the configuration, the plan shows an
   update, and the deploy fails with `WorkersBuildsError`, as before.
