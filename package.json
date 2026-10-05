@@ -1,5 +1,5 @@
 {
-  "name": "@samebase/alchemy-cloudflare-workers",
+  "name": "@samebase/alchemy-cloudflare-workers-builds",
   "version": "0.3.1",
   "description": "Alchemy v2 resources for Cloudflare Workers Builds: a Worker whose code Workers Builds deploys, the repository connection, the triggers, the build variables, and the Worker secrets.",
   "keywords": [
@@ -10,14 +10,14 @@
     "workers",
     "workers-builds"
   ],
-  "homepage": "https://github.com/samebase/alchemy-cloudflare-workers#readme",
+  "homepage": "https://github.com/samebase/alchemy-cloudflare-workers-builds#readme",
   "bugs": {
-    "url": "https://github.com/samebase/alchemy-cloudflare-workers/issues"
+    "url": "https://github.com/samebase/alchemy-cloudflare-workers-builds/issues"
   },
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/samebase/alchemy-cloudflare-workers.git"
+    "url": "git+https://github.com/samebase/alchemy-cloudflare-workers-builds.git"
   },
   "files": [
     "lib",

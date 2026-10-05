@@ -2,6 +2,9 @@
 
 ## 0.3.1
 
+Renamed to `@samebase/alchemy-cloudflare-workers-builds`. The old name, `@samebase/alchemy-cloudflare-workers`,
+is deprecated on npm and stays at 0.3.0.
+
 An account without a build token no longer needs a manual step in the Cloudflare dashboard.
 
 - `WorkersBuilds.Repository`: without `buildToken`, on an account without a build token, the

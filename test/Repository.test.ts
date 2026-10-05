@@ -450,7 +450,7 @@ describe("currentRepository", () => {
 
   it("takes GITHUB_REPOSITORY in GitHub Actions and never runs git", async () => {
     const github = recordedRepository();
-    const origin = git("https://github.com/samebase/alchemy-cloudflare-workers.git\n");
+    const origin = git("https://github.com/samebase/alchemy-cloudflare-workers-builds.git\n");
     const env = {
       GITHUB_ACTIONS: "true",
       GITHUB_SHA: "6e532269f4bd1e8e0a2a5c9e2d4f6b8a0c1e3f5a",

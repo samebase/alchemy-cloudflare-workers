@@ -1,7 +1,7 @@
 # Examples
 
 Each folder is a complete `alchemy.run.ts` that imports this package from source, so it tracks
-the checkout. In your own app, import `@samebase/alchemy-cloudflare-workers` instead.
+the checkout. In your own app, import `@samebase/alchemy-cloudflare-workers-builds` instead.
 
 - `worker/`: one Worker shell and its Workers Builds link, with local state. Set
   `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, and `EXAMPLE_BUILD_SECRET`, then run

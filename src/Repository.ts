@@ -587,7 +587,7 @@ const readGitHubRepository = (repository: { readonly owner: string; readonly nam
     ).pipe(
       HttpClientRequest.setHeaders({
         Accept: "application/vnd.github+json",
-        "User-Agent": "@samebase/alchemy-cloudflare-workers",
+        "User-Agent": "@samebase/alchemy-cloudflare-workers-builds",
         "X-GitHub-Api-Version": "2022-11-28",
       }),
     );

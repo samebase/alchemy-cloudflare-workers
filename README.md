@@ -1,4 +1,4 @@
-# @samebase/alchemy-cloudflare-workers
+# @samebase/alchemy-cloudflare-workers-builds
 
 [Alchemy v2](https://alchemy.run) resources for Cloudflare Workers that
 [Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/) deploys from a Git
@@ -41,7 +41,7 @@ two never write different values.
 ## Install
 
 ```sh
-pnpm add -D @samebase/alchemy-cloudflare-workers alchemy@2.0.0-beta.80 effect@^4.0.0 @effect/platform-node@^4.0.0
+pnpm add -D @samebase/alchemy-cloudflare-workers-builds alchemy@2.0.0-beta.80 effect@^4.0.0 @effect/platform-node@^4.0.0
 ```
 
 ## Credentials
@@ -84,7 +84,7 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as WorkersBuilds from "@samebase/alchemy-cloudflare-workers";
+import * as WorkersBuilds from "@samebase/alchemy-cloudflare-workers-builds";
 
 export default Alchemy.Stack(
   "MyApp",

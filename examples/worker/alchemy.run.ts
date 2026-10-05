@@ -6,7 +6,7 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as WorkersBuilds from "../../src/index.ts"; // in your app: "@samebase/alchemy-cloudflare-workers"
+import * as WorkersBuilds from "../../src/index.ts"; // in your app: "@samebase/alchemy-cloudflare-workers-builds"
 
 export default Alchemy.Stack(
   "WorkersBuildsExample",
