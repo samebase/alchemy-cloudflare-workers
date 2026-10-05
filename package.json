@@ -68,8 +68,7 @@
     "effect": "^4.0.0"
   },
   "engines": {
-    "node": ">=24.11.0",
-    "pnpm": ">=11.18.0"
+    "node": ">=22"
   },
   "packageManager": "pnpm@11.18.0"
 }
