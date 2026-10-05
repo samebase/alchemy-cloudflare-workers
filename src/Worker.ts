@@ -9,6 +9,7 @@ import * as workers from "@distilled.cloud/cloudflare/workers";
 import { Resource } from "alchemy";
 import { Unowned } from "alchemy/AdoptPolicy";
 import { isResolved } from "alchemy/Diff";
+import { createPhysicalName } from "alchemy/PhysicalName";
 import * as Provider from "alchemy/Provider";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -18,10 +19,18 @@ import type { Providers } from "./Providers.ts";
 export interface WorkerProps {
   /**
    * Worker name: lowercase letters, digits, and dashes. With Worker Previews,
-   * at most 54 characters. It must match `name` in the repository's Wrangler
-   * file. A new name replaces the Worker.
+   * at most 54 characters. A new name replaces the Worker. On Wrangler 3 and
+   * later, Workers Builds deploys to the connected Worker with this name,
+   * whatever `name` the Wrangler file has.
+   *
+   * Without it, the provider makes a name on create, as other Alchemy
+   * resources do: the stack name, the logical id, the stage, and 8 random
+   * characters, lowercase and at most 54 characters, such as
+   * `myapp-worker-dev-k3m7x2ab`. The name stays in state, and later deploys
+   * use the stored name. The name is also the `workers.dev` hostname, so a
+   * production Worker usually wants an explicit name.
    */
-  readonly name: string;
+  readonly name?: string;
   /**
    * `workers.dev` route and preview URLs.
    * @default { enabled: true, previewsEnabled: true }
@@ -96,13 +105,14 @@ export const DEFAULT_OBSERVABILITY: workers.BetaWorkersCreateRequestObservabilit
   // propagation is enabled for the account, even with traces off.
 };
 
-/** The create request: props over the defaults. */
+/** The create request: props over the defaults. `name` is `props.name` or the physical name. */
 export const createRequest = (
   accountId: string,
+  name: string,
   props: WorkerProps,
 ): workers.CreateBetaWorkerRequest => ({
   accountId,
-  name: props.name,
+  name,
   logpush: props.logpush ?? false,
   observability: props.observability ?? DEFAULT_OBSERVABILITY,
   subdomain: props.subdomain ?? { enabled: true, previewsEnabled: true },
@@ -143,51 +153,83 @@ export const editBody = (props: WorkerProps): Record<string, unknown> =>
 export const workersDevUrl = (name: string, subdomain: string | undefined): string | undefined =>
   subdomain === undefined ? undefined : `https://${name}.${subdomain}.workers.dev`;
 
-/** A new name or another account is a new Worker; anything else is an edit. */
+/**
+ * A new explicit name or another account is a new Worker; anything else is
+ * an edit. `oldName` is the deployed name. A Worker without `name` keeps it,
+ * so only an explicit name that differs replaces the Worker.
+ */
 export const diffWorker = (input: {
-  readonly olds: WorkerProps;
+  readonly oldName: string;
   readonly news: WorkerProps;
   readonly output: WorkerAttributes | undefined;
   readonly accountId: string;
 }) =>
-  input.olds.name !== input.news.name ||
+  (input.news.name ?? input.oldName) !== input.oldName ||
   (input.output !== undefined && input.output.accountId !== input.accountId)
     ? ({ action: "replace" } as const)
     : undefined;
 
+/**
+ * The name of a Worker without `name`: Alchemy's physical name from the
+ * stack name, the logical id, the stage, and the first 8 characters of the
+ * instance id, lowercase, at most 54 characters (the limit with Worker
+ * Previews). The instance id stays the same until a replacement, so an
+ * interrupted create gets the same name again.
+ */
+export const physicalWorkerName = (id: string) =>
+  createPhysicalName({ id, lowercase: true, maxLength: 54, suffixLength: 8 });
+
 /** The fields of the PATCH result that the provider checks. */
 const EditedWorker = Schema.Struct({ id: Schema.String });
+
+/**
+ * `WorkersBuilds.Worker(id)` without props gives the handlers `undefined`
+ * props, although Alchemy's handler type says that they are set. Each
+ * handler reads its props through this.
+ */
+const propsOrEmpty = (props: WorkerProps | undefined): WorkerProps => props ?? {};
 
 export const WorkerProvider = () =>
   Provider.succeed(Worker, {
     stables: ["workerId", "name", "accountId"],
 
-    diff: Effect.fn(function* ({ olds, news, output }) {
+    diff: Effect.fn(function* ({ id, olds, news, output }) {
       if (!isResolved(news)) return undefined;
       // Otherwise undefined: the engine updates when any prop changed.
-      return diffWorker({ olds, news, output, accountId: yield* currentAccountId });
+      return diffWorker({
+        oldName: output?.name ?? propsOrEmpty(olds).name ?? (yield* physicalWorkerName(id)),
+        news: propsOrEmpty(news),
+        output,
+        accountId: yield* currentAccountId,
+      });
     }),
 
     read: Effect.fn(function* ({ olds, output }) {
+      // The Workers API accepts the id or the name in the path. Without
+      // both, the name would come from a new instance id, so no Worker has it.
+      const key = output?.workerId ?? propsOrEmpty(olds).name;
+      if (key === undefined) return undefined;
       const accountId = output?.accountId ?? (yield* currentAccountId);
-      // The Workers API accepts the id or the name in the path.
-      const worker = yield* findWorker(accountId, output?.workerId ?? olds.name);
+      const worker = yield* findWorker(accountId, key);
       if (worker === undefined) return undefined;
       const attributes = yield* attributesOf(accountId, worker);
       // Without state, a Worker with this name belongs to someone else until --adopt.
       return output === undefined ? Unowned(attributes) : attributes;
     }),
 
-    reconcile: Effect.fn(function* ({ news, output }) {
+    reconcile: Effect.fn(function* ({ id, news: props, output }) {
+      const news = propsOrEmpty(props);
       const accountId = yield* currentAccountId;
+      // The stored name first, so a made name never changes after create.
+      const name = output?.name ?? news.name ?? (yield* physicalWorkerName(id));
       // By id first, then by name: this also finds a Worker that an
       // interrupted create made, and a Worker that --adopt takes over.
       const existing =
         (output === undefined ? undefined : yield* findWorker(accountId, output.workerId)) ??
-        (yield* findWorker(accountId, news.name));
+        (yield* findWorker(accountId, name));
       if (existing === undefined) {
         const created = yield* workers
-          .createBetaWorker(createRequest(accountId, news))
+          .createBetaWorker(createRequest(accountId, name, news))
           .pipe(refused("create Worker"));
         return yield* attributesOf(accountId, created);
       }
@@ -205,7 +247,7 @@ export const WorkerProvider = () =>
     }),
 
     delete: Effect.fn(function* ({ olds, output }) {
-      if (!olds.delete) return;
+      if (!propsOrEmpty(olds).delete) return;
       yield* workers
         .deleteBetaWorker({ accountId: output.accountId, workerId: output.workerId })
         .pipe(

@@ -1,4 +1,8 @@
 import { readFileSync } from "node:fs";
+import { InstanceId } from "alchemy/InstanceId";
+import { Stack } from "alchemy/Stack";
+import { Stage } from "alchemy/Stage";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vitest";
 import {
@@ -6,6 +10,7 @@ import {
   DEFAULT_OBSERVABILITY,
   diffWorker,
   editBody,
+  physicalWorkerName,
   type WorkerAttributes,
   workersDevUrl,
 } from "../src/Worker.ts";
@@ -17,7 +22,7 @@ const accountId = "fe57d01d7ab41f60d00ba1aade20eb33";
 
 describe("createRequest", () => {
   it("sends the Samebase create defaults for a name alone", () => {
-    expect(createRequest(accountId, { name: "my-app" })).toEqual({
+    expect(createRequest(accountId, "my-app", {})).toEqual({
       accountId,
       name: "my-app",
       logpush: false,
@@ -40,8 +45,7 @@ describe("createRequest", () => {
   });
 
   it("puts each declared setting over its default", () => {
-    const request = createRequest(accountId, {
-      name: "my-app",
+    const request = createRequest(accountId, "my-app", {
       logpush: true,
       subdomain: { enabled: false, previewsEnabled: true },
       tags: ["team:web"],
@@ -59,13 +63,12 @@ describe("createRequest", () => {
 
 describe("editBody", () => {
   it("is empty when the props name no setting, so Wrangler keeps its settings", () => {
-    expect(editBody({ name: "my-app", delete: true })).toEqual({});
+    expect(editBody({ delete: true })).toEqual({});
   });
 
   it("holds only the declared settings, in the API's snake_case", () => {
     expect(
       editBody({
-        name: "my-app",
         subdomain: { enabled: true, previewsEnabled: false },
         observability: { enabled: true, headSamplingRate: 0.5, logs: { invocationLogs: false } },
         tailConsumers: [{ name: "log-sink" }],
@@ -111,14 +114,23 @@ describe("diffWorker", () => {
 
   it("replaces the Worker for a new name", () => {
     expect(
-      diffWorker({ olds: { name: "my-app" }, news: { name: "my-app-2" }, output, accountId }),
+      diffWorker({ oldName: "my-app", news: { name: "my-app-2" }, output, accountId }),
     ).toEqual({ action: "replace" });
+  });
+
+  it("keeps the deployed name when the props leave it out", () => {
+    const made = { ...output, name: "myapp-worker-dev-j4gduhm3" };
+    expect(diffWorker({ oldName: made.name, news: {}, output: made, accountId })).toBeUndefined();
+    expect(
+      diffWorker({ oldName: made.name, news: { name: made.name }, output: made, accountId }),
+    ).toBeUndefined();
+    expect(diffWorker({ oldName: "my-app", news: {}, output, accountId })).toBeUndefined();
   });
 
   it("replaces the Worker for another account", () => {
     expect(
       diffWorker({
-        olds: { name: "my-app" },
+        oldName: "my-app",
         news: { name: "my-app" },
         output,
         accountId: "00000000000000000000000000000000",
@@ -129,11 +141,47 @@ describe("diffWorker", () => {
   it("leaves settings changes to the engine, which updates through PATCH", () => {
     expect(
       diffWorker({
-        olds: { name: "my-app" },
+        oldName: "my-app",
         news: { name: "my-app", logpush: true, delete: true },
         output,
         accountId,
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("physicalWorkerName", () => {
+  /** 16 bytes, hex, as the engine makes an instance id. Base32 starts with `j4gduhm3`. */
+  const instanceId = "4f0c3a1d9b2e47a8b6c5d4e3f2a1b0c9";
+
+  const nameIn = (stack: string, stage: string, id: string) =>
+    Effect.runSync(
+      physicalWorkerName(id).pipe(
+        Effect.provideService(Stack, {
+          name: stack,
+          stage,
+          resources: {},
+          bindings: {},
+          actions: {},
+        }),
+        Effect.provideService(Stage, stage),
+        Effect.provideService(InstanceId, instanceId),
+      ),
+    );
+
+  it("joins the stack, the logical id, the stage, and 8 instance characters in lowercase", () => {
+    expect(nameIn("MyApp", "dev", "Worker")).toBe("myapp-worker-dev-j4gduhm3");
+  });
+
+  it("turns other characters into dashes, as the Workers API accepts only these", () => {
+    const name = nameIn("my_app", "pr_42", "Web.Worker");
+    expect(name).toBe("my-app-web-worker-pr-42-j4gduhm3");
+    expect(name).toMatch(/^[a-z0-9-]+$/);
+  });
+
+  it("keeps a long name at 54 characters, the limit with Worker Previews, and keeps the suffix", () => {
+    const name = nameIn("a-stack-name-that-is-long-enough", "production", "WorkerOfTheApp");
+    expect(name).toHaveLength(54);
+    expect(name.endsWith("j4gduhm3")).toBe(true);
   });
 });

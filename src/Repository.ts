@@ -9,6 +9,7 @@ import * as workersBuilds from "@distilled.cloud/cloudflare/workers_builds";
 import { Resource } from "alchemy";
 import { Unowned } from "alchemy/AdoptPolicy";
 import { isResolved } from "alchemy/Diff";
+import { GitHubEnv } from "alchemy/GitHub";
 import * as Provider from "alchemy/Provider";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
@@ -17,6 +18,8 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as ChildProcess from "effect/process/ChildProcess";
+import { ChildProcessSpawner } from "effect/process/ChildProcessSpawner";
 import {
   absentAsUndefined,
   cloudflareRequest,
@@ -34,17 +37,23 @@ export interface GitHubRepository {
   readonly owner: string;
   /** Repository name without the owner. */
   readonly name: string;
-  /** Production branch. Pushes to other branches build Worker Previews. */
-  readonly branch: string;
   /**
-   * Numeric GitHub id of the owner. With `repositoryId`, it skips the GitHub
-   * lookup. Without both, the provider reads
+   * Production branch. Pushes to other branches build Worker Previews.
+   * @default the default branch of the repository on GitHub
+   */
+  readonly branch?: string;
+  /**
+   * Numeric GitHub id of the owner. With `repositoryId` and `branch`, it
+   * skips the GitHub lookup. Without all three, the provider reads
    * `GET https://api.github.com/repos/{owner}/{name}` with `GITHUB_TOKEN` or
    * `GITHUB_ACCESS_TOKEN` when set, else without a token (public
    * repositories only).
    */
   readonly ownerId?: number;
-  /** Numeric GitHub id of the repository. See `ownerId`. */
+  /**
+   * Numeric GitHub id of the repository. It stays the same when the
+   * repository gets a new name or owner. See `ownerId`.
+   */
   readonly repositoryId?: number;
 }
 
@@ -54,9 +63,16 @@ export interface RepositoryProps {
   /**
    * The GitHub repository. The Cloudflare Workers and Pages GitHub App must
    * have access to it. A different repository replaces the configuration; a
-   * different branch is an update.
+   * different branch is an update. With `repositoryId` on both sides, only
+   * the id counts, so a renamed repository is an update.
+   *
+   * Without it, the provider uses {@link currentRepository} on each deploy:
+   * the repository of the GitHub Actions run, else the `origin` remote of
+   * the current directory. Then the plan cannot see that the current
+   * repository changed, and a deploy that reconciles the configuration
+   * fails when it builds from another repository.
    */
-  readonly repository: GitHubRepository;
+  readonly repository?: GitHubRepository;
   /** Build command, such as `pnpm run build`. */
   readonly buildCommand: string;
   /** Production deploy command. @default "npx wrangler deploy" */
@@ -154,15 +170,28 @@ export const WorkerBuilds = Schema.Struct({
 });
 export type WorkerBuilds = typeof WorkerBuilds.Type;
 
-/** The fields of GET https://api.github.com/repos/{owner}/{name} that the provider reads. */
+/**
+ * The fields of GET https://api.github.com/repos/{owner}/{name} that the
+ * provider reads. Recorded payload: test/fixtures/github/repos_get.json.
+ */
 export const GitHubRepositoryResponse = Schema.Struct({
   id: Schema.Number,
-  owner: Schema.Struct({ id: Schema.Number }),
+  name: Schema.String,
+  default_branch: Schema.String,
+  owner: Schema.Struct({ id: Schema.Number, login: Schema.String }),
 });
 
-export interface RepositoryIds {
-  readonly ownerId: string;
-  readonly repositoryId: string;
+/** A GitHub repository as GitHub reports it. */
+export interface CurrentRepository {
+  /** Owner login, such as `samebase`. */
+  readonly owner: string;
+  /** Repository name without the owner. */
+  readonly name: string;
+  readonly defaultBranch: string;
+  /** Numeric GitHub id of the owner. */
+  readonly ownerId: number;
+  /** Numeric GitHub id of the repository. */
+  readonly repositoryId: number;
 }
 
 /** `null` removes a variable. A Redacted value becomes a secret, which Cloudflare never returns. */
@@ -207,17 +236,17 @@ const buildSettings = (
 export const createBody = (input: {
   readonly scriptTag: string;
   readonly props: RepositoryProps;
-  readonly ids: RepositoryIds;
+  readonly repository: Required<GitHubRepository>;
   readonly buildToken: string;
 }) => ({
   script_tag: input.scriptTag,
   git_repository: {
     provider_type: "github",
-    provider_account_id: input.ids.ownerId,
-    provider_account_name: input.props.repository.owner,
-    repo_id: input.ids.repositoryId,
-    repo_name: input.props.repository.name,
-    branch: input.props.repository.branch,
+    provider_account_id: String(input.repository.ownerId),
+    provider_account_name: input.repository.owner,
+    repo_id: String(input.repository.repositoryId),
+    repo_name: input.repository.name,
+    branch: input.repository.branch,
   },
   production_settings: buildSettings(
     input.props,
@@ -242,12 +271,14 @@ export const createBody = (input: {
 export const updateBody = (input: {
   readonly news: RepositoryProps;
   readonly olds: RepositoryProps | undefined;
+  /** The production branch: `repository.branch`, else the default branch on GitHub. */
+  readonly branch: string;
   readonly buildToken: string;
 }) => {
   const production = input.news.variables ?? {};
   const preview = previewBuildVariables(input.news);
   return {
-    git_repository: { branch: input.news.repository.branch },
+    git_repository: { branch: input.branch },
     production_settings: buildSettings(
       input.news,
       input.buildToken,
@@ -272,8 +303,12 @@ export const updateBody = (input: {
 
 /**
  * Another Worker, repository, or account is a new configuration; anything
- * else is an update. GitHub names are case-insensitive. Adding the numeric
- * ids of the same repository is an update.
+ * else is an update. With `repositoryId` on both sides, only the ids count:
+ * GitHub keeps the id when a repository gets a new name or owner. Without
+ * them, the names count, and GitHub names are case-insensitive. Adding the
+ * numeric ids of the same repository is an update. Without `repository` on
+ * one side, the plan cannot compare repositories; reconcile then checks the
+ * repository of the configuration.
  */
 export const diffRepository = (input: {
   readonly olds: RepositoryProps;
@@ -285,11 +320,14 @@ export const diffRepository = (input: {
   const after = input.news.repository;
   const fullName = (repository: GitHubRepository) =>
     `${repository.owner}/${repository.name}`.toLowerCase();
+  const otherRepository =
+    before !== undefined &&
+    after !== undefined &&
+    (before.repositoryId !== undefined && after.repositoryId !== undefined
+      ? before.repositoryId !== after.repositoryId
+      : fullName(before) !== fullName(after));
   return input.olds.worker !== input.news.worker ||
-    fullName(before) !== fullName(after) ||
-    (before.repositoryId !== undefined &&
-      after.repositoryId !== undefined &&
-      before.repositoryId !== after.repositoryId) ||
+    otherRepository ||
     (input.output !== undefined && input.output.accountId !== input.accountId)
     ? ({ action: "replace" } as const)
     : undefined;
@@ -353,10 +391,11 @@ export const RepositoryProvider = () =>
       return output === undefined ? Unowned(attributes) : attributes;
     }),
 
-    reconcile: Effect.fn(function* ({ news, olds, output }) {
+    reconcile: Effect.fn(function* ({ news, olds }) {
       const accountId = yield* currentAccountId;
       const scriptTag = news.worker;
       const path = `/accounts/${accountId}/builds/workers/${scriptTag}`;
+      const repository = yield* resolveRepository(news.repository);
       let builds = yield* getBuilds(accountId, scriptTag);
 
       if (builds === undefined) {
@@ -365,23 +404,16 @@ export const RepositoryProvider = () =>
           operation: "create Workers Builds configuration",
           method: "POST",
           path: `/accounts/${accountId}/builds/workers`,
-          body: createBody({
-            scriptTag,
-            props: news,
-            ids: yield* resolveRepositoryIds(news.repository),
-            buildToken,
-          }),
+          body: createBody({ scriptTag, props: news, repository, buildToken }),
           result: WorkerBuilds,
         });
-      } else if (output === undefined) {
-        // Adopted, or created by an interrupted run: it must build this repository.
-        const ids = yield* resolveRepositoryIds(news.repository);
-        if (builds.git_repository.repo_id !== ids.repositoryId) {
-          return yield* new WorkersBuildsError({
-            operation: "adopt Workers Builds configuration",
-            message: `Worker ${scriptTag} builds from ${builds.git_repository.provider_account_name}/${builds.git_repository.repo_name}, not ${news.repository.owner}/${news.repository.name}. Disconnect it in the Cloudflare dashboard first.`,
-          });
-        }
+      } else if (builds.git_repository.repo_id !== String(repository.repositoryId)) {
+        // Adopted, created by an interrupted run, or a current repository
+        // that changed since the last deploy: it must build this repository.
+        return yield* new WorkersBuildsError({
+          operation: "check Workers Builds repository",
+          message: `Worker ${scriptTag} builds from ${builds.git_repository.provider_account_name}/${builds.git_repository.repo_name}, not ${repository.owner}/${repository.name}. Disconnect it in the Cloudflare dashboard first.`,
+        });
       }
 
       // Cloudflare can create legacy branch triggers even when the request
@@ -408,6 +440,7 @@ export const RepositoryProvider = () =>
         body: updateBody({
           news,
           olds,
+          branch: repository.branch,
           buildToken: news.buildToken ?? builds.production_settings.build_token_uuid,
         }),
         result: WorkerBuilds,
@@ -494,12 +527,13 @@ const gitHubToken = Config.Redacted("GITHUB_TOKEN").pipe(
   Config.option,
 );
 
-/** The numeric GitHub ids that Workers Builds addresses a repository by. */
-export const resolveRepositoryIds = (repository: GitHubRepository) =>
+/**
+ * GET https://api.github.com/repos/{owner}/{name}: the names as GitHub
+ * writes them, the ids that Workers Builds addresses a repository by, and
+ * the default branch.
+ */
+const readGitHubRepository = (repository: { readonly owner: string; readonly name: string }) =>
   Effect.gen(function* () {
-    if (repository.ownerId !== undefined && repository.repositoryId !== undefined) {
-      return { ownerId: String(repository.ownerId), repositoryId: String(repository.repositoryId) };
-    }
     const operation = `read GitHub repository ${repository.owner}/${repository.name}`;
     const token = Option.getOrUndefined(yield* gitHubToken);
     const client = yield* HttpClient.HttpClient;
@@ -523,16 +557,91 @@ export const resolveRepositoryIds = (repository: GitHubRepository) =>
       .pipe(Effect.mapError((cause) => failed(cause.message)));
     if (response.status !== 200) {
       return yield* failed(
-        `HTTP ${response.status}. For a private repository, set GITHUB_TOKEN or pass repository.ownerId and repository.repositoryId.`,
+        `HTTP ${response.status}. For a private repository, set GITHUB_TOKEN or pass repository.ownerId, repository.repositoryId, and repository.branch.`,
         response.status,
       );
     }
     const body = yield* response.json.pipe(Effect.mapError((cause) => failed(cause.message)));
-    const parsed = yield* Schema.decodeUnknownEffect(GitHubRepositoryResponse)(body).pipe(
+    return yield* Schema.decodeUnknownEffect(GitHubRepositoryResponse)(body).pipe(
       Effect.mapError((issue) => failed(`unexpected response: ${issue.message}`)),
+      Effect.map((parsed): CurrentRepository => ({
+        owner: parsed.owner.login,
+        name: parsed.name,
+        defaultBranch: parsed.default_branch,
+        ownerId: parsed.owner.id,
+        repositoryId: parsed.id,
+      })),
     );
+  });
+
+/** `https://github.com/<owner>/<name>` or `git@github.com:<owner>/<name>`, each with or without `.git`. */
+const GITHUB_REMOTE =
+  /^(?:https:\/\/github\.com\/|git@github\.com:)([\w.-]+)\/([\w.-]+?)(?:\.git)?$/;
+
+/**
+ * The GitHub repository of this run, for a run file that works unchanged in
+ * every fork, such as a Worker named after the repository:
+ *
+ * 1. In GitHub Actions, `GITHUB_REPOSITORY` (Alchemy's `GitHubEnv`).
+ * 2. Else the `origin` remote of the current directory
+ *    (`git remote get-url origin`).
+ *
+ * Then it reads the ids and the default branch from GitHub, as
+ * `WorkersBuilds.Repository` does. It fails with {@link WorkersBuildsError}
+ * when neither source names a GitHub repository or GitHub does not answer.
+ * A run file can fail only with `ConfigError`, so pipe it through
+ * `Effect.orDie` there.
+ */
+export const currentRepository = Effect.gen(function* () {
+  const actions = yield* GitHubEnv;
+  if (actions !== undefined) {
+    return yield* readGitHubRepository({ owner: actions.owner, name: actions.repository });
+  }
+  // Git prints nothing to stdout without a repository or an origin remote,
+  // and a missing git fails the spawn: both mean no origin.
+  const origin = yield* (yield* ChildProcessSpawner)
+    .string(ChildProcess.make("git", ["remote", "get-url", "origin"]))
+    .pipe(Effect.orElseSucceed(() => ""));
+  const [, owner, name] = GITHUB_REMOTE.exec(origin.trim()) ?? [];
+  if (owner === undefined || name === undefined) {
+    // Never quote the remote: an https remote can hold a token.
+    return yield* new WorkersBuildsError({
+      operation: "find GitHub repository",
+      message:
+        "find GitHub repository: no GitHub repository. Pass repository, run in GitHub Actions, or run in a clone whose origin remote is https://github.com/<owner>/<name> or git@github.com:<owner>/<name>.",
+    });
+  }
+  return yield* readGitHubRepository({ owner, name });
+});
+
+/**
+ * Everything Workers Builds needs about the repository: `repository`, else
+ * {@link currentRepository}, with the GitHub ids and with the default branch
+ * when `branch` is absent. One GitHub call at most, and none when the props
+ * hold `ownerId`, `repositoryId`, and `branch`.
+ */
+export const resolveRepository = (repository: GitHubRepository | undefined) =>
+  Effect.gen(function* () {
+    if (
+      repository?.branch !== undefined &&
+      repository.ownerId !== undefined &&
+      repository.repositoryId !== undefined
+    ) {
+      return {
+        owner: repository.owner,
+        name: repository.name,
+        branch: repository.branch,
+        ownerId: repository.ownerId,
+        repositoryId: repository.repositoryId,
+      } satisfies Required<GitHubRepository>;
+    }
+    const github =
+      repository === undefined ? yield* currentRepository : yield* readGitHubRepository(repository);
     return {
-      ownerId: String(repository.ownerId ?? parsed.owner.id),
-      repositoryId: String(repository.repositoryId ?? parsed.id),
-    };
+      owner: github.owner,
+      name: github.name,
+      branch: repository?.branch ?? github.defaultBranch,
+      ownerId: repository?.ownerId ?? github.ownerId,
+      repositoryId: repository?.repositoryId ?? github.repositoryId,
+    } satisfies Required<GitHubRepository>;
   });

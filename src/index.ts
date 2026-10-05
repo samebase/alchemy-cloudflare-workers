@@ -5,6 +5,8 @@ export { PermissionError, TOKEN_PERMISSIONS, WorkersBuildsError } from "./Api.ts
 export { Providers, providers } from "./Providers.ts";
 export {
   type BuildVariables,
+  type CurrentRepository,
+  currentRepository,
   type GitHubRepository,
   Repository,
   type RepositoryAttributes,

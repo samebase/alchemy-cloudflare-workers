@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.0
+
+A run file can now leave out the Worker name and the repository, so it works unchanged in each fork
+of the repository.
+
+- `WorkersBuilds.Repository`: `repository` is optional. Without it, the provider uses the
+  repository of the run: `GITHUB_REPOSITORY` in GitHub Actions (Alchemy's `GitHubEnv`), else the
+  `origin` remote of the current directory. When neither gives a repository, the deploy fails with
+  one `WorkersBuildsError`.
+- `WorkersBuilds.Repository`: `repository.branch` is optional. Without it, the production branch is
+  the default branch from the same GitHub call that reads the ids.
+- `WorkersBuilds.Repository`: with `repositoryId` in the old and the new props, the diff compares
+  only the ids. A renamed repository is an update, not a replacement.
+- `WorkersBuilds.Repository`: each deploy that reconciles the configuration checks that it builds
+  from the repository, by id, and reads the repository from GitHub unless the props hold `ownerId`,
+  `repositoryId`, and `branch`. Before, only adoption checked, and only create and adoption read
+  GitHub.
+- `WorkersBuilds.currentRepository`: the same resolver for the run file. It yields
+  `{ owner, name, defaultBranch, ownerId, repositoryId }`. A run file pipes it through
+  `Effect.orDie`, because a run file can fail only with `ConfigError`.
+- `WorkersBuilds.Worker`: `name` is optional. Without it, the provider makes the name with Alchemy's
+  `createPhysicalName` (stack, logical id, stage, 8 characters, at most 54) on create and keeps it in
+  state. Only an explicit name that differs replaces the Worker. `WorkersBuilds.Worker(id)` without
+  props works.
+- Docs: on Wrangler 3 and later, Workers Builds deploys to the connected Worker whatever `name` the
+  Wrangler file has, so the names need not match.
+
 ## 0.2.0
 
 - `WorkersBuilds.Secret`: write one Worker secret through the Workers script API, for a Worker
