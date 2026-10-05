@@ -10,22 +10,28 @@ The package adds only what the built-in `alchemy/Cloudflare` provider does not h
 - `WorkersBuilds.Worker`: a Worker that exists without code.
 - `WorkersBuilds.Repository`: the Workers Builds configuration that links a GitHub repository to
   that Worker.
+- `WorkersBuilds.Secret`: a secret of that Worker. Wrangler keeps it on each deploy.
 
 This is a community provider, maintained by [Samebase](https://samebase.com).
 
-Status: 0.1, pinned to `alchemy@2.0.0-beta.80` and Effect 4. Alchemy ships breaking changes
+Status: 0.2, pinned to `alchemy@2.0.0-beta.80` and Effect 4. Alchemy ships breaking changes
 between betas. Upgrade this package and Alchemy together.
 
 ## Ownership rule
 
-Wrangler owns the version. This package owns the shell and the link.
+Wrangler owns the version. This package owns the shell, the link, and the secrets.
 
-- The Wrangler file in the repository is the only source of truth for the code, bindings, vars,
-  assets, routes, and compatibility settings. Alchemy never uploads code and never writes these.
+- The Wrangler file in the repository is the only source of truth for the code, the bindings
+  other than secrets, vars, assets, routes, and compatibility settings. Alchemy never uploads code
+  and never writes these.
 - Workers Builds runs `npx wrangler deploy` on each push to the production branch and
   `npx wrangler preview` on each other branch.
 - This package creates the Worker shell, links the repository, sets the build commands, and writes
   the build variables.
+- This package also writes the Worker secrets. Wrangler
+  [does not delete secrets](https://developers.cloudflare.com/workers/wrangler/configuration/#source-of-truth)
+  on deploy, so a secret that this package writes stays across builds. Give each name one owner:
+  do not also set a secret name in `vars` of the Wrangler file.
 
 Wrangler also writes some Worker settings on each deploy: `observability`, `logpush`,
 `workers_dev`, and `preview_urls`. `WorkersBuilds.Worker` writes a setting after create only when
@@ -87,13 +93,20 @@ export default Alchemy.Stack(
       previewVariables: { CONVEX_DEPLOY_KEY: Config.Redacted("CONVEX_PREVIEW_DEPLOY_KEY") },
     });
 
+    // A Worker secret: the code reads it as env.API_KEY.
+    yield* WorkersBuilds.Secret("ApiKey", {
+      worker: worker.name,
+      name: "API_KEY",
+      value: Config.Redacted("API_KEY"),
+    });
+
     return { url: worker.url, triggerIds: builds.triggerIds };
   }),
 );
 ```
 
-Alchemy creates the Worker first, because the configuration uses `worker.workerId`. The Worker has
-no version until Workers Builds builds the next push to `main`.
+Alchemy creates the Worker first, because the configuration and the secret use its outputs. The
+Worker has no version until Workers Builds builds the next push to `main`.
 
 ## Resources
 
@@ -168,15 +181,41 @@ Outputs: `scriptTag`, `repoConnectionId`, `triggerIds`, `previewsEnabled`, `acco
 - An existing configuration for the Worker is adopted only with `--adopt`, and only when it builds
   from the same repository.
 
+### `WorkersBuilds.Secret`
+
+Calls `PUT` and `GET /accounts/{account_id}/workers/scripts/{script_name}/secrets` and
+`DELETE .../workers/scripts/{script_name}/secrets/{secret_name}`.
+
+| Prop     | Default  | Change  |
+| -------- | -------- | ------- |
+| `worker` | required | replace |
+| `name`   | required | replace |
+| `value`  | required | update  |
+
+Outputs: `workerName`, `name`, `accountId`.
+
+- Worker: these endpoints address the Worker by its name. Pass `worker.name` of a
+  `WorkersBuilds.Worker`. The Worker must exist. If it does not, the write fails with
+  `WorkersBuildsError`.
+- Value: a `Redacted` string, such as `Config.Redacted("API_KEY")`. Cloudflare never returns a
+  value, so the provider reads only the names. A new value is written on the next deploy.
+- Versions: each write and each delete creates a new version of the Worker. Wrangler keeps secrets
+  on deploy, so the next build keeps the secret.
+- Destroy deletes the secret. A secret or Worker that is already gone is not an error.
+- An existing secret with the same name is adopted only with `--adopt`. The first deploy after
+  `--adopt` writes the value.
+
 ## Limits
 
 - GitHub only. Workers Builds also supports GitLab; this package does not.
 - The package cannot create a build token. A build token wraps an account API token, and creating
   one needs more permissions than the three above.
-- Secret build variables are part of Alchemy state. Alchemy's Cloudflare state store encrypts
-  state at rest; the local file store does not.
+- Secret build variables and `WorkersBuilds.Secret` values are part of Alchemy state. Alchemy's
+  Cloudflare state store encrypts state at rest; the local file store does not.
 - Turning `previews` from `true` to `false` sends `previews_enabled: false`. The live tests do not
   cover this case yet.
+- A secret on a Worker that has no version yet, such as a new shell before its first build, is not
+  proven. `secret.live.test.ts` covers this case. It has not run yet.
 
 ## Development
 
@@ -187,7 +226,8 @@ pnpm run build            # lib/ with declarations
 pnpm run test:live        # real API calls, see below
 ```
 
-Unit tests run against recorded Cloudflare and GitHub payloads in `test/fixtures/`. They make no
+Unit tests run against recorded Cloudflare and GitHub payloads in `test/fixtures/`, and against
+secret payloads that follow Cloudflare's API schema until a live run records them. They make no
 network calls.
 
 Live tests run only with `ALCHEMY_WORKERS_BUILDS_LIVE=1`:
@@ -198,6 +238,9 @@ Live tests run only with `ALCHEMY_WORKERS_BUILDS_LIVE=1`:
   GitHub repository that the Cloudflare GitHub App can read. The defaults are in
   `test/live/env.ts`. It creates resources named `tmp-alchemy-workers-builds-*` and removes them
   again.
+- `secret.live.test.ts` needs `CLOUDFLARE_API_TOKEN` with the permissions above and no GitHub
+  repository. It creates a Worker shell named `tmp-alchemy-workers-builds-secret-*`, writes,
+  updates, and deletes a secret on it, and deletes the Worker.
 
 Releases: push a `v*` tag; `.github/workflows/release.yml` publishes with npm trusted publishing.
 

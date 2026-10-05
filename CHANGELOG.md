@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0
+
+- `WorkersBuilds.Secret`: write one Worker secret through the Workers script API, for a Worker
+  that Workers Builds deploys. Wrangler keeps secrets on deploy, so the secret stays across builds.
+  A different Worker or name replaces the secret, and a new value updates it. Read checks only the
+  name, because Cloudflare never returns a value. An existing secret is adopted only with
+  `--adopt`, and the first deploy after that writes the value. Destroy deletes the secret.
+- Unit tests prove the requests and the error handling on payloads from Cloudflare's API schema.
+  The live test (`secret.live.test.ts`) has not run yet.
+
 ## 0.1.0
 
 First release, pinned to `alchemy@2.0.0-beta.80` and Effect 4. Proven on a Samebase-managed app:

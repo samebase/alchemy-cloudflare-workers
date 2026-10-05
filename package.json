@@ -1,7 +1,7 @@
 {
   "name": "@samebase/alchemy-cloudflare-workers",
-  "version": "0.1.0",
-  "description": "Alchemy v2 resources for Cloudflare Workers Builds: a Worker whose code Workers Builds deploys, the repository connection, the triggers, and the build variables.",
+  "version": "0.2.0",
+  "description": "Alchemy v2 resources for Cloudflare Workers Builds: a Worker whose code Workers Builds deploys, the repository connection, the triggers, the build variables, and the Worker secrets.",
   "keywords": [
     "alchemy",
     "cloudflare",
