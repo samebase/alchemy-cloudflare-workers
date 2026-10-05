@@ -10,10 +10,9 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "allowImportingTsExtensions": true,
-    "rewriteRelativeImportExtensions": false,
     "noEmit": true,
     "skipLibCheck": true,
     "isolatedModules": true
   },
-  "include": ["src", "test", "examples", "vite.config.ts"]
+  "include": ["src", "test", "examples", "scripts", "vite.config.ts"]
 }
