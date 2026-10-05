@@ -40,21 +40,24 @@
     "check": "vp fmt --check && vp lint && pnpm run typecheck && vp test --run",
     "typecheck": "tsc --noEmit",
     "test": "vp test --run",
-    "test:live": "ALCHEMY_WORKERS_BUILDS_LIVE=1 vp test --run test/live",
+    "test:live": "node ./scripts/test-live.ts",
     "format": "vp fmt",
     "lint": "vp lint",
-    "build": "rm -rf lib && tsc -p tsconfig.build.json",
-    "prepack": "pnpm run build"
+    "build": "vp pack",
+    "prepack": "pnpm run build",
+    "prepare": "vp config --no-agent"
   },
   "dependencies": {
     "@distilled.cloud/cloudflare": "1.0.0-rc.13"
   },
   "devDependencies": {
+    "@arethetypeswrong/core": "^0.18.5",
     "@effect/platform-node": "4.0.0",
     "@effect/vitest": "4.0.0",
     "@types/node": "^24.0.0",
     "alchemy": "2.0.0-beta.80",
     "effect": "4.0.0",
+    "publint": "^0.3.25",
     "typescript": "^5.9.0",
     "vite-plus": "0.3.0",
     "vitest": "^4.0.0"

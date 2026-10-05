@@ -292,15 +292,18 @@ Outputs: `workerName`, `name`, `accountId`.
 ```sh
 pnpm install
 pnpm run check            # format, lint, typecheck, unit tests
-pnpm run build            # lib/ with declarations
+pnpm run build            # lib/ with declarations, then publint and attw
 pnpm run test:live        # real API calls, see below
 ```
+
+Use Node 24 (`.node-version`) and pnpm 11. `pnpm install` also installs a pre-commit hook that
+runs `vp staged`.
 
 Unit tests run against recorded Cloudflare and GitHub payloads in `test/fixtures/`, and against
 secret and build token payloads that follow Cloudflare's API schema until a live run records them.
 They make no network calls.
 
-Live tests run only with `ALCHEMY_WORKERS_BUILDS_LIVE=1`:
+Live tests run only with `ALCHEMY_WORKERS_BUILDS_LIVE=1`, which `pnpm run test:live` sets:
 
 - `permission.live.test.ts` needs only the network. It runs a plan through the Alchemy engine with
   a placeholder token and expects `WorkersBuildsPermissionError`.
@@ -312,7 +315,8 @@ Live tests run only with `ALCHEMY_WORKERS_BUILDS_LIVE=1`:
   repository. It creates a Worker shell named `tmp-alchemy-workers-builds-secret-*`, writes,
   updates, and deletes a secret on it, and deletes the Worker.
 
-Releases: push a `v*` tag; `.github/workflows/release.yml` publishes with npm trusted publishing.
+Releases: change `version` in `package.json` in a pull request. After the merge,
+`.github/workflows/release.yml` publishes that version from `main` with npm trusted publishing.
 
 ## License
 
