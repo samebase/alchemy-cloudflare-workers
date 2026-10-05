@@ -27,6 +27,20 @@ Facts in these payloads: the create call returned `previews_enabled: false` with
 although the request asked for previews, so the provider calls `migrate_to_previews` after create.
 The account's `workers.dev` subdomain is `rir`, as the preview URL shows.
 
+## Cloudflare, from the API schema
+
+No call recorded these files yet. The success files follow the response schema in Cloudflare's
+OpenAPI document. Secret values are write-only in that schema, so a response never holds one. The
+error file uses code 10007, which distilled maps to `WorkerNotFound` on these endpoints, with the
+message that the Samebase tests hold for that code. Its HTTP status is not known, so the tests send
+it with 400 and with 404. Replace each file with a recording when the secret live test runs.
+
+| File                                   | Endpoint                                                                         | Source                                  |
+| -------------------------------------- | -------------------------------------------------------------------------------- | --------------------------------------- |
+| `workers_scripts_secrets_list.json`    | GET /accounts/{account_id}/workers/scripts/{script_name}/secrets                 | OpenAPI `worker-list-script-secrets`    |
+| `workers_scripts_secrets_put.json`     | PUT /accounts/{account_id}/workers/scripts/{script_name}/secrets                 | OpenAPI `worker-put-script-secret`      |
+| `workers_scripts_not_found_error.json` | /accounts/{account_id}/workers/scripts/{script_name}/..., Worker does not exist | code 10007, Samebase test message       |
+
 ## GitHub
 
 | File                    | Endpoint                                                                         | Captured   |
