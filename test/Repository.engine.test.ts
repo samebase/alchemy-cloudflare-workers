@@ -52,6 +52,17 @@ const withIds = (repository: GitHubRepository) => ({
   repositoryId: repository.id,
 });
 
+/** The attributes as 0.4 saved them: no repository and no settings. */
+const before05 = Schema.decodeUnknownSync(
+  Schema.Struct({
+    scriptTag: Schema.String,
+    repoConnectionId: Schema.optionalKey(Schema.String),
+    triggerIds: Schema.Array(Schema.String),
+    previewsEnabled: Schema.Boolean,
+    accountId: Schema.String,
+  }),
+);
+
 /** A stack with one Builds configuration for `worker`. */
 const stack = (repository: WorkersBuilds.GitHubRepository | undefined, worker = scriptTag) =>
   Effect.gen(function* () {
@@ -293,18 +304,105 @@ describe("a configuration that is gone", () => {
   });
 });
 
-describe("state from 0.4", () => {
-  /** The attributes as 0.4 saved them: no repository and no settings. */
-  const before05 = Schema.decodeUnknownSync(
-    Schema.Struct({
-      scriptTag: Schema.String,
-      repoConnectionId: Schema.optionalKey(Schema.String),
-      triggerIds: Schema.Array(Schema.String),
-      previewsEnabled: Schema.Boolean,
-      accountId: Schema.String,
-    }),
-  );
+describe("a repair that failed halfway", () => {
+  /** A deployed configuration that the dashboard then connected to another repository. */
+  const reconnected = async <A>(
+    api: FakeApi,
+    deploy: ReturnType<typeof engine>,
+    program: Effect.Effect<A, never, WorkersBuilds.Providers>,
+  ) => {
+    await deploy.deploy(program);
+    const current = api.configurations.get(scriptTag);
+    if (current === undefined) throw new Error("no configuration");
+    api.configurations.set(scriptTag, {
+      ...current,
+      git_repository: {
+        ...current.git_repository,
+        repo_id: String(other.id),
+        repo_name: other.name,
+      },
+    });
+  };
 
+  it("is completed by the next deploy when the delete of the configuration failed", async () => {
+    const api = github();
+    const deploy = engine(api);
+    const program = stack(byName(recorded));
+    await reconnected(api, deploy, program);
+
+    // The repair deletes the triggers, and then the delete of the configuration fails.
+    api.failures.add(`DELETE /builds/workers/${scriptTag}`);
+    expect(await deploy.repair().then(() => "repaired", String)).not.toBe("repaired");
+    expect(api.triggers.get(scriptTag)).toEqual([]);
+    expect(api.configurations.has(scriptTag)).toBe(true);
+
+    expect((await deploy.plan(program)).resources["Builds"]?.action).toBe("update");
+    await deploy.deploy(program);
+    expect(api.configurations.get(scriptTag)?.git_repository.repo_id).toBe(String(recorded.id));
+    expect(api.triggers.get(scriptTag)).toHaveLength(1);
+  });
+
+  it("does not pick another account token for state from 0.4", async () => {
+    const api = github();
+    const saved = registeredBuildToken();
+    api.buildTokens.push(saved);
+    const deploy = engine(api);
+    const unpinned = (token?: string) =>
+      Effect.gen(function* () {
+        const builds = yield* WorkersBuilds.Repository("Builds", {
+          worker: scriptTag,
+          repository: byName(recorded),
+          buildCommand: "pnpm run build",
+          ...(token === undefined ? {} : { buildToken: token }),
+        });
+        return { scriptTag: builds.scriptTag };
+      });
+    await reconnected(api, deploy, unpinned());
+    await deploy.editAttributes("Builds", before05);
+    api.buildTokens.push({
+      ...saved,
+      build_token_name: "zz-newer",
+      build_token_uuid: "37ba157d-9fb1-4cf9-8382-4d9fe7d69816",
+    });
+
+    // The repair deletes the configuration, and then the create fails.
+    api.failures.add("POST /builds/workers");
+    expect(await deploy.repair().then(() => "repaired", String)).not.toBe("repaired");
+    expect(api.configurations.has(scriptTag)).toBe(false);
+
+    const failed = await deploy.deploy(unpinned()).then(() => undefined, String);
+    expect(failed).toContain("Pass buildToken");
+    expect(api.configurations.has(scriptTag)).toBe(false);
+
+    await deploy.deploy(unpinned(saved.build_token_uuid));
+    expect(api.configurations.get(scriptTag)?.production_settings.build_token_uuid).toBe(
+      saved.build_token_uuid,
+    );
+  });
+});
+
+describe("a configuration that is gone, with the repository of the run", () => {
+  it("is created again only for the repository that the state saved", async () => {
+    const api = github();
+    const remote = { origin: `git@github.com:${owner}/${recorded.name}.git\n` };
+    const deploy = engine(api, remote);
+    await deploy.deploy(stack(undefined));
+    // Someone deletes the configuration in the dashboard.
+    api.configurations.delete(scriptTag);
+    api.requests.length = 0;
+
+    remote.origin = `git@github.com:${owner}/${other.name}.git\n`;
+    const failed = await deploy.deploy(stack(undefined)).then(() => undefined, String);
+    expect(failed).toContain("pass repository");
+    expect(api.requests).not.toContain("POST /builds/workers");
+
+    remote.origin = `git@github.com:${owner}/${recorded.name}.git\n`;
+    await deploy.deploy(stack(undefined));
+    expect(api.configurations.get(scriptTag)?.git_repository.repo_id).toBe(String(recorded.id));
+  });
+});
+
+describe("state from 0.4", () => {
   it("moves to another repository only with buildToken, because it has no saved token", async () => {
     const api = github();
     api.buildTokens.push(registeredBuildToken());

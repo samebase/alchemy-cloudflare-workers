@@ -17,9 +17,11 @@ settings that the resources own.
   saved build token, also when a deploy retries a failed create.
 - `WorkersBuilds.Repository`: another `worker` or account is still a replacement, as in 0.4. That
   is another configuration, so the order is safe, and `RemovalPolicy.retain()` keeps the old one.
-- `WorkersBuilds.Repository`: the plan reads the configuration of the Worker. When it is gone, such
-  as after a failed create or a delete in the dashboard, the plan shows an update, and the deploy
-  creates it again. Before, the plan showed no change until a drift check.
+- `WorkersBuilds.Repository`: the plan reads the configuration of the Worker. When it is gone or
+  builds from another repository, such as after a delete in the dashboard or a move that failed
+  halfway, the plan shows an update, and the deploy completes it. Before, the plan showed no change
+  until a drift check. Without `repository`, the deploy creates a configuration again only for the
+  repository in state, and with no saved build token it asks for `buildToken`.
 - `WorkersBuilds.Repository`: only an explicit `repository` prop moves the builds to another
   repository. When the repository of the run differs from the configuration, the plan shows an
   update, and the deploy fails with `WorkersBuildsError`, as before.

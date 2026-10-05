@@ -215,7 +215,14 @@ describe("diffRepository", () => {
     preview: { ...settings, deployCommand: "npx wrangler preview" },
   };
   const diff = (news: RepositoryProps, target = resolved) =>
-    diffRepository({ olds: props, news, output, accountId, target, exists: true });
+    diffRepository({
+      olds: props,
+      news,
+      output,
+      accountId,
+      target,
+      liveRepositoryId: resolved.repositoryId,
+    });
   const keepsAll = { action: "update", stables: ["scriptTag", "repoConnectionId", "accountId"] };
 
   it("is no change when the props and the resolved repository match the configuration", () => {
@@ -248,22 +255,23 @@ describe("diffRepository", () => {
         output,
         accountId,
         target: fork,
-        exists: true,
+        liveRepositoryId: resolved.repositoryId,
       }),
     ).toEqual({ action: "update", stables: ["scriptTag", "accountId"] });
   });
 
-  it("updates when the configuration is gone, so the deploy creates it again", () => {
-    expect(
+  it("updates when the configuration is gone or builds from another repository", () => {
+    const read = (liveRepositoryId: number | undefined) =>
       diffRepository({
         olds: props,
         news: props,
         output,
         accountId,
         target: resolved,
-        exists: false,
-      }),
-    ).toEqual(keepsAll);
+        liveRepositoryId,
+      });
+    expect(read(undefined)).toEqual({ action: "update", stables: ["scriptTag", "accountId"] });
+    expect(read(1)).toEqual({ action: "update", stables: ["scriptTag", "accountId"] });
   });
 
   it("updates when the default branch on GitHub changed", () => {
@@ -276,7 +284,7 @@ describe("diffRepository", () => {
         output,
         accountId,
         target: { ...resolved, branch: "trunk" },
-        exists: true,
+        liveRepositoryId: resolved.repositoryId,
       }),
     ).toEqual(keepsAll);
   });
@@ -291,7 +299,7 @@ describe("diffRepository", () => {
         output,
         accountId: "00000000000000000000000000000000",
         target: resolved,
-        exists: true,
+        liveRepositoryId: resolved.repositoryId,
       }),
     ).toEqual(moved);
   });
@@ -321,7 +329,7 @@ describe("diffRepository", () => {
           output: saved,
           accountId,
           target: resolved,
-          exists: true,
+          liveRepositoryId: resolved.repositoryId,
         }),
       ).toEqual(keepsAll);
     }
@@ -339,7 +347,14 @@ describe("diffRepository", () => {
       preview: { ...output.preview, variables },
     });
     const diffFrom = (from: RepositoryAttributes) =>
-      diffRepository({ olds: news, news, output: from, accountId, target: resolved, exists: true });
+      diffRepository({
+        olds: news,
+        news,
+        output: from,
+        accountId,
+        target: resolved,
+        liveRepositoryId: resolved.repositoryId,
+      });
 
     // Someone else's variable and another build token stay: no change.
     expect(
@@ -357,7 +372,7 @@ describe("diffRepository", () => {
         output: saved({ buildToken: "other" }),
         accountId,
         target: resolved,
-        exists: true,
+        liveRepositoryId: resolved.repositoryId,
       }),
     ).toEqual(keepsAll);
   });
@@ -371,7 +386,7 @@ describe("diffRepository", () => {
         output: before,
         accountId,
         target: resolved,
-        exists: true,
+        liveRepositoryId: resolved.repositoryId,
       }),
     ).toEqual({ action: "update", stables: ["scriptTag", "accountId"] });
   });

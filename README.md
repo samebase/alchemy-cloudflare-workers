@@ -271,9 +271,11 @@ production branch), and `production` and `preview` (the build settings). See
   Only an explicit `repository` prop moves the builds to another repository. State from 0.4 has no
   saved build token, so the first move after the upgrade needs `buildToken`, or one deploy without
   the move first.
-- A configuration that is gone: the plan reads the configuration of the Worker. When it is gone,
-  such as after someone deleted it or after a failed create, the plan shows an update, and the
-  deploy creates it again.
+- A configuration that is gone or moved: the plan reads the configuration of the Worker. When it
+  is gone, or builds from another repository, such as after someone changed it or after a move or
+  repair that failed halfway, the plan shows an update, and the deploy completes it. Without
+  `repository`, the deploy creates a configuration again only for the repository in state. When
+  the state has no saved build token (state from 0.4), it needs `buildToken` for that.
 - Another Worker: another `worker` or account replaces the resource. That is another
   configuration, so Alchemy creates it and then deletes the old one. `Alchemy.RemovalPolicy.retain()`
   keeps the old one. When the same deploy replaces the `WorkersBuilds.Worker`, the plan does not

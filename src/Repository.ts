@@ -430,7 +430,8 @@ const settingsDiffer = (
  * from. Only the repository id counts: GitHub keeps it when a repository
  * gets a new name or owner, and Workers Builds keeps the old names. Another
  * id or branch, changed props, saved settings that differ from the props, or
- * a configuration that is gone are an update. State from 0.4 has no repository and no settings in its
+ * a configuration that is gone or builds from another repository than the
+ * plan read are an update. State from 0.4 has no repository and no settings in its
  * attributes, so the first plan after the upgrade is an update, which saves
  * them.
  *
@@ -443,17 +444,21 @@ export const diffRepository = (input: {
   readonly output: RepositoryAttributes | RepositoryAttributesBefore05;
   readonly accountId: string;
   readonly target: Required<GitHubRepository>;
-  /** Whether Workers Builds still has the configuration. */
-  readonly exists: boolean;
+  /**
+   * The repository id of the configuration as the plan read it, or
+   * `undefined` when the configuration is gone.
+   */
+  readonly liveRepositoryId: number | undefined;
 }): UpdateDiff | ReplaceDiff | undefined => {
   const { olds, news, output, target } = input;
   if (output.scriptTag !== news.worker || output.accountId !== input.accountId) {
     return { action: "replace" };
   }
   const saved = "repository" in output ? output : undefined;
-  const sameRepository = saved?.repository.repositoryId === target.repositoryId;
+  const sameRepository =
+    saved?.repository.repositoryId === target.repositoryId &&
+    input.liveRepositoryId === target.repositoryId;
   const changed =
-    !input.exists ||
     saved === undefined ||
     !sameRepository ||
     saved.repository.branch !== target.branch ||
@@ -529,16 +534,17 @@ export const RepositoryProvider = () =>
       if (!isResolved(news) || output === undefined) return undefined;
       const accountId = yield* currentAccountId;
       const same = output.scriptTag === news.worker && output.accountId === accountId;
+      // The plan reads the configuration, so a configuration that is gone or
+      // builds from another repository, such as after a repair that failed
+      // halfway, is an update that completes it. A replacement needs no read.
+      const live = same ? yield* getBuilds(accountId, output.scriptTag) : undefined;
       return diffRepository({
         olds,
         news,
         output,
         accountId,
         target: yield* resolveRepositoryOnce(news.repository),
-        // A configuration that is gone, such as after a repair that deleted
-        // it and then failed to create it, means no automatic builds. The
-        // plan reads it, so the next deploy creates it again.
-        exists: same ? (yield* getBuilds(accountId, output.scriptTag)) !== undefined : true,
+        liveRepositoryId: live === undefined ? undefined : Number(live.git_repository.repo_id),
       });
     }),
 
@@ -568,47 +574,70 @@ export const RepositoryProvider = () =>
         builds?.production_settings.build_token_uuid ??
         (own !== undefined && "production" in own ? own.production.buildToken : undefined);
 
-      if (
-        builds !== undefined &&
-        Number(builds.git_repository.repo_id) !== repository.repositoryId
-      ) {
-        const from = `${builds.git_repository.provider_account_name}/${builds.git_repository.repo_name}`;
+      // The repository that the Worker builds from now: the configuration,
+      // or the saved one when the configuration is gone.
+      const current =
+        builds !== undefined
+          ? {
+              id: Number(builds.git_repository.repo_id),
+              name: `${builds.git_repository.provider_account_name}/${builds.git_repository.repo_name}`,
+            }
+          : own !== undefined && "repository" in own
+            ? {
+                id: own.repository.repositoryId,
+                name: `${own.repository.owner}/${own.repository.name}`,
+              }
+            : undefined;
+      if (current !== undefined && current.id !== repository.repositoryId) {
         const to = `${repository.owner}/${repository.name}`;
         // Only a configuration that this resource wrote for this Worker
         // moves to another repository. An adopted configuration, or one
         // that an interrupted create found, belongs to someone else.
-        if (olds === undefined || own === undefined) {
+        if (builds !== undefined && (olds === undefined || own === undefined)) {
           return yield* new WorkersBuildsError({
             operation: "check Workers Builds repository",
-            message: `Worker ${scriptTag} builds from ${from}, not ${to}. Disconnect it in the Cloudflare dashboard first.`,
+            message: `Worker ${scriptTag} builds from ${current.name}, not ${to}. Disconnect it in the Cloudflare dashboard first.`,
           });
         }
         // The repository of the run is not an intent to move the builds:
-        // a clone of a fork must not take over the configuration.
+        // a clone of a fork must not take over the configuration, also not
+        // when the deploy creates a configuration that is gone.
         if (news.repository === undefined) {
           return yield* new WorkersBuildsError({
             operation: "check Workers Builds repository",
-            message: `Worker ${scriptTag} builds from ${from}, not ${to}, the repository of this run. To move the builds to ${to}, pass repository. Else run the deploy from a clone of ${from}.`,
+            message: `Worker ${scriptTag} builds from ${current.name}, not ${to}, the repository of this run. To move the builds to ${to}, pass repository. Else run the deploy from a clone of ${current.name}.`,
           });
         }
+      }
+      if (builds !== undefined && current !== undefined && current.id !== repository.repositoryId) {
         // A retry after a failed create below must find the build token in
         // the saved attributes. State from 0.4 has none, so it must not
         // delete the configuration that holds the token.
-        if (news.buildToken === undefined && !("production" in own)) {
+        if (news.buildToken === undefined && (own === undefined || !("production" in own))) {
           return yield* new WorkersBuildsError({
             operation: "check Workers Builds repository",
-            message: `Worker ${scriptTag} builds from ${from}, and the state, saved by 0.4, has no build token. To move the builds to ${to}, pass buildToken, or deploy once without the move first.`,
+            message: `Worker ${scriptTag} builds from ${current.name}, and the state, saved by 0.4, has no build token. To move the builds to ${repository.owner}/${repository.name}, pass buildToken, or deploy once without the move first.`,
           });
         }
         // Another repository for the same Worker. Workers Builds keeps one
         // configuration per Worker, and its PATCH changes only the branch
         // of the repository. So this reconcile deletes the old triggers and
         // the old configuration first, and then creates the configuration
-        // for the new repository below, in that order. If the create fails,
-        // the next plan finds no configuration, and the deploy creates it
-        // with the saved build token.
+        // for the new repository below, in that order. If a step fails, the
+        // next plan reads the configuration that is left or gone, and the
+        // deploy completes the move with the saved build token.
         yield* deleteConfiguration(accountId, scriptTag);
         builds = undefined;
+      }
+
+      // A configuration that is gone, of state that has no saved build
+      // token (0.4, or a drift repair of it): another token of the account
+      // could deploy with other permissions, so only `buildToken` decides.
+      if (builds === undefined && buildToken === undefined && own !== undefined) {
+        return yield* new WorkersBuildsError({
+          operation: "create Workers Builds configuration",
+          message: `The Workers Builds configuration of Worker ${scriptTag} is gone, and the state has no saved build token. Pass buildToken to create it again.`,
+        });
       }
 
       if (builds === undefined) {
