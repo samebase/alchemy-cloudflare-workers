@@ -193,62 +193,118 @@ describe("updateBody", () => {
 });
 
 describe("diffRepository", () => {
+  /** The settings that `props` ask for, as Workers Builds reports them. */
+  const settings = {
+    buildCommand: "pnpm run build",
+    deployCommand: "npx wrangler deploy",
+    rootDirectory: "/",
+    pathIncludes: ["*"],
+    pathExcludes: [],
+    buildCachingEnabled: true,
+    buildToken: legacy.production_settings.build_token_uuid,
+    variables: {},
+  };
   const output: RepositoryAttributes = {
     scriptTag: legacy.script_tag,
     repoConnectionId: undefined,
     triggerIds: [],
-    previewsEnabled: false,
+    previewsEnabled: true,
     accountId,
+    repository: resolved,
+    production: settings,
+    preview: { ...settings, deployCommand: "npx wrangler preview" },
   };
+  const diff = (news: RepositoryProps, target = resolved) =>
+    diffRepository({
+      olds: props,
+      news,
+      output,
+      accountId,
+      target,
+      liveRepositoryId: resolved.repositoryId,
+    });
+  const keepsAll = { action: "update", stables: ["scriptTag", "repoConnectionId", "accountId"] };
 
-  it.each([
-    ["another Worker", { ...props, worker: "eaeec9c35fa64976a823c246164f4204" }],
-    ["another owner", { ...props, repository: { ...repository, owner: "samebase" } }],
-    ["another repository", { ...props, repository: { ...repository, name: "other" } }],
-  ])("replaces the configuration for %s", (_, news) => {
-    expect(diffRepository({ olds: props, news, output, accountId })).toEqual({
-      action: "replace",
+  it("is no change when the props and the resolved repository match the configuration", () => {
+    expect(diff(props)).toBeUndefined();
+  });
+
+  it("updates a renamed repository, by the id that GitHub keeps, whatever side has the ids", () => {
+    const renamed = { ...resolved, owner: "samebase", name: "renamed" };
+    const { ownerId: _, repositoryId: __, ...names } = renamed;
+    for (const repository of [names, renamed]) {
+      expect(diff({ ...props, repository }, renamed)).toEqual(keepsAll);
+    }
+  });
+
+  it("updates, and never replaces, for another repository id", () => {
+    const other = { ...resolved, name: "other", repositoryId: 1 };
+    expect(diff({ ...props, repository: other }, other)).toEqual({
+      action: "update",
+      stables: ["scriptTag", "accountId"],
     });
   });
 
-  it("replaces the configuration for another repository id, and only then", () => {
-    const pinned = { ...props, repository: { ...repository, repositoryId: 1358278395 } };
-    const other = { ...props, repository: { ...repository, repositoryId: 1 } };
-    expect(diffRepository({ olds: pinned, news: other, output, accountId })).toEqual({
-      action: "replace",
-    });
-    expect(diffRepository({ olds: props, news: pinned, output, accountId })).toBeUndefined();
-    const renamed = { ...props, repository: { ...repository, owner: "Samebase-Live-Tests" } };
-    expect(diffRepository({ olds: props, news: renamed, output, accountId })).toBeUndefined();
-  });
-
-  it("updates a renamed repository: the same id under another owner and name", () => {
-    const pinned = { ...props, repository: { ...repository, repositoryId: 1358278395 } };
-    const renamed = {
-      ...props,
-      repository: { owner: "samebase", name: "renamed", branch: "main", repositoryId: 1358278395 },
-    };
-    expect(diffRepository({ olds: pinned, news: renamed, output, accountId })).toBeUndefined();
-  });
-
-  it("leaves a repository that one side does not name to reconcile", () => {
+  it("updates when the repository of the run changed and the props did not", () => {
     const { repository: _, ...current } = props;
-    expect(diffRepository({ olds: props, news: current, output, accountId })).toBeUndefined();
-    expect(diffRepository({ olds: current, news: props, output, accountId })).toBeUndefined();
+    const fork = { ...resolved, owner: "someone", repositoryId: 2 };
+    expect(
+      diffRepository({
+        olds: current,
+        news: current,
+        output,
+        accountId,
+        target: fork,
+        liveRepositoryId: resolved.repositoryId,
+      }),
+    ).toEqual({ action: "update", stables: ["scriptTag", "accountId"] });
   });
 
-  it("replaces the configuration for another account", () => {
+  it("updates when the configuration is gone or builds from another repository", () => {
+    const read = (liveRepositoryId: number | undefined) =>
+      diffRepository({
+        olds: props,
+        news: props,
+        output,
+        accountId,
+        target: resolved,
+        liveRepositoryId,
+      });
+    expect(read(undefined)).toEqual({ action: "update", stables: ["scriptTag", "accountId"] });
+    expect(read(1)).toEqual({ action: "update", stables: ["scriptTag", "accountId"] });
+  });
+
+  it("updates when the default branch on GitHub changed", () => {
+    const { branch: _, ...withoutBranch } = repository;
+    const news = { ...props, repository: withoutBranch };
+    expect(
+      diffRepository({
+        olds: news,
+        news,
+        output,
+        accountId,
+        target: { ...resolved, branch: "trunk" },
+        liveRepositoryId: resolved.repositoryId,
+      }),
+    ).toEqual(keepsAll);
+  });
+
+  it("replaces for another Worker or account, which is another configuration", () => {
+    const moved = { action: "replace" };
+    expect(diff({ ...props, worker: "eaeec9c35fa64976a823c246164f4204" })).toEqual(moved);
     expect(
       diffRepository({
         olds: props,
         news: props,
         output,
         accountId: "00000000000000000000000000000000",
+        target: resolved,
+        liveRepositoryId: resolved.repositoryId,
       }),
-    ).toEqual({ action: "replace" });
+    ).toEqual(moved);
   });
 
-  it("leaves branch, command, variable, and previews changes to the engine as updates", () => {
+  it("updates for branch, command, variable, and previews changes", () => {
     const news: RepositoryProps = {
       ...props,
       repository: { ...repository, branch: "release" },
@@ -256,7 +312,83 @@ describe("diffRepository", () => {
       variables: { GREETING: Redacted.make("hi") },
       previews: false,
     };
-    expect(diffRepository({ olds: props, news, output, accountId })).toBeUndefined();
+    expect(diff(news, { ...resolved, branch: "release" })).toEqual(keepsAll);
+  });
+
+  it("updates when the saved settings differ from the props", () => {
+    const changed = [
+      { ...output, production: { ...settings, buildCommand: "npm run build" } },
+      { ...output, preview: { ...output.preview, pathIncludes: ["src/*"] } },
+      { ...output, previewsEnabled: false },
+    ];
+    for (const saved of changed) {
+      expect(
+        diffRepository({
+          olds: props,
+          news: props,
+          output: saved,
+          accountId,
+          target: resolved,
+          liveRepositoryId: resolved.repositoryId,
+        }),
+      ).toEqual(keepsAll);
+    }
+  });
+
+  it("compares the variables that the props name, by kind, and the token only when named", () => {
+    const news: RepositoryProps = {
+      ...props,
+      variables: { GREETING: "hello", CONVEX_DEPLOY_KEY: Redacted.make("key") },
+    };
+    const variables = { CONVEX_DEPLOY_KEY: "secret", GREETING: "plain" } as const;
+    const saved = (production: Partial<typeof settings>) => ({
+      ...output,
+      production: { ...settings, variables, ...production },
+      preview: { ...output.preview, variables },
+    });
+    const diffFrom = (from: RepositoryAttributes) =>
+      diffRepository({
+        olds: news,
+        news,
+        output: from,
+        accountId,
+        target: resolved,
+        liveRepositoryId: resolved.repositoryId,
+      });
+
+    // Someone else's variable and another build token stay: no change.
+    expect(
+      diffFrom(saved({ variables: { ...variables, OTHER: "plain" }, buildToken: "other" })),
+    ).toBeUndefined();
+    // A removed or retyped variable is a change.
+    expect(diffFrom(saved({ variables: { GREETING: "plain" } }))).toEqual(keepsAll);
+    expect(diffFrom(saved({ variables: { ...variables, GREETING: "secret" } }))).toEqual(keepsAll);
+    // A token that the props name counts.
+    const pinned = { ...news, buildToken: settings.buildToken };
+    expect(
+      diffRepository({
+        olds: pinned,
+        news: pinned,
+        output: saved({ buildToken: "other" }),
+        accountId,
+        target: resolved,
+        liveRepositoryId: resolved.repositoryId,
+      }),
+    ).toEqual(keepsAll);
+  });
+
+  it("updates state from 0.4, which has no repository or settings in its attributes, to save them", () => {
+    const { repository: _, production: __, preview: ___, ...before } = output;
+    expect(
+      diffRepository({
+        olds: props,
+        news: props,
+        output: before,
+        accountId,
+        target: resolved,
+        liveRepositoryId: resolved.repositoryId,
+      }),
+    ).toEqual({ action: "update", stables: ["scriptTag", "accountId"] });
   });
 });
 

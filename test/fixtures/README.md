@@ -42,6 +42,13 @@ it with 400 and with 404. Replace each file with a recording when the secret liv
 | `workers_scripts_not_found_error.json` | /accounts/{account_id}/workers/scripts/{script_name}/... and DELETE /accounts/{account_id}/workers/workers/{worker_id}, Worker does not exist | code 10007, Samebase test message       |
 | `user_tokens_verify.json`              | GET /user/tokens/verify                                                          | OpenAPI `user-api-tokens-verify-token`  |
 | `builds_tokens_create.json`            | POST /accounts/{account_id}/builds/tokens                                        | OpenAPI `createBuildToken`              |
+| `workers_workers_get.json`             | GET /accounts/{account_id}/workers/workers/{worker_id}                           | OpenAPI `getWorker`                     |
+
+The Worker file is the example of the schema without `previews_base_config` and
+`observability.issues`, which the provider does not read. It has dates in place of the `string`
+placeholders, `false` in place of the `boolean` placeholder, and `null` for
+`traces.propagation_policy`, which the schema returns when the account has no trace propagation. `test/engine.ts` uses it as the start
+of each Worker that its fake API creates.
 
 The verify file is the example of the schema. The create file has the uuid of the documentation
 example, the token id of the verify file, and the name that the provider sends for the stack

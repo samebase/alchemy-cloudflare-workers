@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.5.0
+
+`WorkersBuilds.Repository` is no longer replaced for the same Worker, and drift detection sees the
+settings that the resources own.
+
+- `WorkersBuilds.Repository`: a renamed repository no longer deletes the Builds configuration.
+  Before, a new name without the GitHub ids on both sides was a replacement. Alchemy creates
+  before it deletes, so the deploy updated the configuration of the same Worker and then deleted
+  it. The deploy reported success, but the Worker had no automatic builds.
+- `WorkersBuilds.Repository`: the diff never replaces the configuration of the same Worker. The
+  plan reads the GitHub ids of the repository (once per deploy) and compares the repository id
+  with the one that the configuration builds from. The same id is an update. Another repository id
+  is also an update: the deploy deletes the triggers and the configuration, then creates the
+  configuration for the new repository. Without `buildToken`, the new configuration keeps the
+  saved build token, also when a deploy retries a failed create.
+- `WorkersBuilds.Repository`: another `worker` or account is still a replacement, as in 0.4. That
+  is another configuration, so the order is safe, and `RemovalPolicy.retain()` keeps the old one.
+- `WorkersBuilds.Repository`: the plan reads the configuration of the Worker. When it is gone or
+  builds from another repository, such as after a delete in the dashboard or a move that failed
+  halfway, the plan shows an update, and the deploy completes it. Before, the plan showed no change
+  until a drift check. Without `repository`, the deploy creates a configuration again only for the
+  repository in state, and with no saved build token it asks for `buildToken`.
+- `WorkersBuilds.Repository`: only an explicit `repository` prop moves the builds to another
+  repository. When the repository of the run differs from the configuration, the plan shows an
+  update, and the deploy fails with `WorkersBuildsError`, as before.
+- `WorkersBuilds.Repository`: new outputs `repository`, `production`, and `preview`. They hold
+  the repository with its GitHub ids, the production branch, and the build settings, with the
+  variable names but no values. `alchemy drift` now sees a changed build command, path filter,
+  root directory, build token, or a removed variable, and the repair restores it. A changed
+  variable value is not drift: Cloudflare never returns secret values, and attributes show in
+  plans.
+- `WorkersBuilds.Worker`: the outputs hold each setting that the props declare, as Cloudflare
+  reports it. `alchemy drift` now sees a change of a declared setting. Settings that the props
+  leave out are still not compared, because the Wrangler file can own them.
+- `WorkersBuilds.Repository` reads the configuration back after its PATCH, and
+  `WorkersBuilds.Worker` reads the Worker back after its PATCH. Each update makes one more GET.
+
+Upgrade:
+
+- The first deploy after the upgrade plans an update of each `WorkersBuilds.Repository`, and of
+  each `WorkersBuilds.Worker` that declares a setting. The update saves the new outputs. It
+  writes the same settings again.
+- A plan now reads GitHub for each `WorkersBuilds.Repository` without `ownerId`, `repositoryId`,
+  and `branch`. For a private repository, set `GITHUB_TOKEN` where you run `alchemy plan`. The plan
+  also reads the Workers Builds configuration, so the token for `alchemy plan` needs Workers Builds
+  access.
+- State from 0.4 has no saved build token. If the first deploy after the upgrade also moves to
+  another repository, pass `buildToken`, or deploy once without the move first. Else the deploy
+  fails with `WorkersBuildsError` and changes nothing.
+
 ## 0.4.0
 
 Breaking change: destroy deletes a `WorkersBuilds.Worker`, as it deletes Alchemy's own
