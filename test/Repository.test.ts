@@ -1,6 +1,13 @@
 import { readFileSync } from "node:fs";
+import {
+  Credentials,
+  fromApiToken,
+  oauthCredentials,
+} from "@distilled.cloud/cloudflare/Credentials";
+import { Stack } from "alchemy/Stack";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
@@ -20,6 +27,7 @@ import {
   GitHubRepositoryResponse,
   type RepositoryAttributes,
   type RepositoryProps,
+  resolveBuildToken,
   resolveRepository,
   selectBuildToken,
   triggerAttributes,
@@ -488,5 +496,120 @@ describe("currentRepository", () => {
     expect(error).toMatchObject({ operation: "find GitHub repository" });
     expect(error.message).not.toContain("gitlab.com");
     expect(github.requests).toHaveLength(0);
+  });
+});
+
+describe("resolveBuildToken", () => {
+  const api = "https://api.cloudflare.com/client/v4";
+  const tokensUrl = `${api}/accounts/${accountId}/builds/tokens`;
+  const listUrl = `${tokensUrl}?page=1&per_page=100`;
+  const verifyUrl = `${api}/user/tokens/verify`;
+  const success = (result: unknown) =>
+    Response.json({ success: true, errors: [], messages: [], result });
+  const Strings = Schema.Record(Schema.String, Schema.String);
+  /** The spec-derived create result, which has the same fields as a list item. */
+  const registered = () =>
+    Schema.decodeUnknownSync(Strings)(fixture("cloudflare/builds_tokens_create.json"));
+
+  /**
+   * Cloudflare with `tokens` as the account's build tokens, the spec-derived
+   * verify response, and `created` as the create result. Records the requests.
+   */
+  const cloudflare = (tokens: readonly unknown[], created: unknown = registered()) =>
+    serve((request) =>
+      request.method === "GET" && request.url === listUrl
+        ? success(tokens)
+        : request.method === "GET" && request.url === verifyUrl
+          ? success(fixture("cloudflare/user_tokens_verify.json"))
+          : request.method === "POST" && request.url === tokensUrl
+            ? success(created)
+            : new Response(null, { status: 404 }),
+    );
+  const calls = (server: ReturnType<typeof serve>) =>
+    server.requests.map((request) => `${request.method} ${request.url}`);
+
+  const resolve = (
+    server: ReturnType<typeof serve>,
+    buildToken: string | undefined,
+    credentials: Layer.Layer<Credentials> = fromApiToken({ apiToken: "test-token" }),
+  ) =>
+    resolveBuildToken(accountId, buildToken).pipe(
+      Effect.provideService(HttpClient.HttpClient, server.client),
+      Effect.provide(credentials),
+      Effect.provideService(Stack, {
+        name: "MyApp",
+        stage: "dev",
+        resources: {},
+        bindings: {},
+        actions: {},
+      }),
+    );
+
+  it("takes buildToken first and calls nothing", async () => {
+    const server = cloudflare([]);
+    const uuid = await Effect.runPromise(
+      resolve(server, legacy.production_settings.build_token_uuid),
+    );
+    expect(uuid).toBe("bf34959e-03df-446a-af6d-b55bff91ab8b");
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("takes the account's first build token next, such as one that an earlier deploy registered", async () => {
+    const server = cloudflare([registered()]);
+    expect(await Effect.runPromise(resolve(server, undefined))).toBe(
+      "182bd5e5-6e1a-4fe4-a799-aa6d9a6ab26e",
+    );
+    expect(calls(server)).toEqual([`GET ${listUrl}`]);
+  });
+
+  it("registers the stack's API token under its verified id when the account has no build token", async () => {
+    const server = cloudflare([]);
+    expect(await Effect.runPromise(resolve(server, undefined))).toBe(
+      "182bd5e5-6e1a-4fe4-a799-aa6d9a6ab26e",
+    );
+    expect(calls(server)).toEqual([`GET ${listUrl}`, `GET ${verifyUrl}`, `POST ${tokensUrl}`]);
+    const [, verify, create] = server.requests;
+    expect(verify?.headers["authorization"]).toBe("Bearer test-token");
+    const body = Schema.decodeUnknownSync(Strings)(
+      create?.body._tag === "Uint8Array"
+        ? JSON.parse(new TextDecoder().decode(create.body.body))
+        : undefined,
+    );
+    expect(Object.keys(body).sort()).toEqual([
+      "build_token_name",
+      "build_token_secret",
+      "cloudflare_token_id",
+    ]);
+    const { build_token_secret: secret, ...named } = body;
+    expect(named).toEqual({
+      build_token_name: "alchemy-MyApp",
+      cloudflare_token_id: "ed17574386854bf78a67040be0a770b0",
+    });
+    // Presence only, so a failure never prints the secret.
+    expect(secret !== undefined && secret.length > 0).toBe(true);
+  });
+
+  it("fails with a WorkersBuildsError for OAuth credentials and registers nothing", async () => {
+    const server = cloudflare([]);
+    const oauth = Layer.succeed(
+      Credentials,
+      Effect.succeed(oauthCredentials({ accessToken: "test-oauth-token" })),
+    );
+    const error = await Effect.runPromise(Effect.flip(resolve(server, undefined, oauth)));
+    expect(error).toBeInstanceOf(WorkersBuildsError);
+    expect(error).toMatchObject({ operation: "register build token" });
+    expect(error.message).toContain("not an API token");
+    expect(error.message).toContain("pass buildToken");
+    expect(error.message).not.toContain("test-oauth-token");
+    expect(calls(server)).toEqual([`GET ${listUrl}`]);
+  });
+
+  it("fails when the create result has no build_token_uuid", async () => {
+    const { build_token_uuid: _, ...withoutUuid } = registered();
+    const error = await Effect.runPromise(
+      Effect.flip(resolve(cloudflare([], withoutUuid), undefined)),
+    );
+    expect(error).toBeInstanceOf(WorkersBuildsError);
+    expect(error.message).toContain("no build_token_uuid");
   });
 });
