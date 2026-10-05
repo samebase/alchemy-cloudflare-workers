@@ -1,0 +1,68 @@
+{
+  "name": "@samebase/alchemy-workers-builds",
+  "version": "0.0.0",
+  "description": "Alchemy v2 resources for Cloudflare Workers Builds: a Worker whose code Workers Builds deploys, the repository connection, the triggers, and the build variables.",
+  "keywords": [
+    "alchemy",
+    "cloudflare",
+    "workers",
+    "workers-builds",
+    "infrastructure-as-code",
+    "effect"
+  ],
+  "homepage": "https://github.com/samebase/alchemy-workers-builds#readme",
+  "bugs": {
+    "url": "https://github.com/samebase/alchemy-workers-builds/issues"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/samebase/alchemy-workers-builds.git"
+  },
+  "files": [
+    "lib",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "check": "vp fmt --check && vp lint && pnpm run typecheck && vp test --run",
+    "typecheck": "tsc --noEmit",
+    "test": "vp test --run",
+    "test:live": "ALCHEMY_CONVEX_LIVE=1 vp test --run test/live",
+    "format": "vp fmt",
+    "lint": "vp lint",
+    "build": "rm -rf lib && tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "4.0.0",
+    "@effect/vitest": "4.0.0",
+    "@types/node": "^24.0.0",
+    "alchemy": "2.0.0-beta.80",
+    "effect": "4.0.0",
+    "typescript": "^5.9.0",
+    "vite-plus": "0.3.0",
+    "vitest": "^4.0.0"
+  },
+  "peerDependencies": {
+    "@effect/platform-node": "^4.0.0",
+    "alchemy": "2.0.0-beta.80",
+    "effect": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.18.0"
+}
