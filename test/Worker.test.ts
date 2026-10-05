@@ -1,17 +1,25 @@
 import { readFileSync } from "node:fs";
+import { fromApiToken } from "@distilled.cloud/cloudflare/Credentials";
+import { havePropsChanged } from "alchemy/Diff";
 import { InstanceId } from "alchemy/InstanceId";
 import { Stack } from "alchemy/Stack";
 import { Stage } from "alchemy/Stage";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
+import * as HttpClient from "effect/http/HttpClient";
+import type * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import { describe, expect, it } from "vitest";
 import {
   createRequest,
   DEFAULT_OBSERVABILITY,
+  deleteWorker,
   diffWorker,
   editBody,
   physicalWorkerName,
   type WorkerAttributes,
+  type WorkerProps,
   workersDevUrl,
 } from "../src/Worker.ts";
 
@@ -19,6 +27,35 @@ const fixture = (file: string): unknown =>
   JSON.parse(readFileSync(new URL(`./fixtures/${file}`, import.meta.url), "utf8"));
 
 const accountId = "fe57d01d7ab41f60d00ba1aade20eb33";
+
+const output: WorkerAttributes = {
+  workerId: "eaeec9c35fa64976a823c246164f4204",
+  name: "my-app",
+  url: "https://my-app.rir.workers.dev",
+  accountId,
+};
+
+/**
+ * Credentials with a placeholder token and an HTTP client that answers every
+ * request with `status` and the JSON `body`. Records the requests.
+ */
+const serve = (status: number, body: unknown) => {
+  const requests: HttpClientRequest.HttpClientRequest[] = [];
+  const layer = Layer.mergeAll(
+    fromApiToken({ apiToken: "test-token" }),
+    Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) => {
+        requests.push(request);
+        return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(body, { status })));
+      }),
+    ),
+  );
+  return { requests, layer };
+};
+
+const run = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(effect);
+const failure = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(Effect.flip(effect));
 
 describe("createRequest", () => {
   it("sends the Samebase create defaults for a name alone", () => {
@@ -63,7 +100,7 @@ describe("createRequest", () => {
 
 describe("editBody", () => {
   it("is empty when the props name no setting, so Wrangler keeps its settings", () => {
-    expect(editBody({ delete: true })).toEqual({});
+    expect(editBody({ name: "my-app" })).toEqual({});
   });
 
   it("holds only the declared settings, in the API's snake_case", () => {
@@ -105,13 +142,6 @@ describe("workersDevUrl", () => {
 });
 
 describe("diffWorker", () => {
-  const output: WorkerAttributes = {
-    workerId: "eaeec9c35fa64976a823c246164f4204",
-    name: "my-app",
-    url: "https://my-app.rir.workers.dev",
-    accountId,
-  };
-
   it("replaces the Worker for a new name", () => {
     expect(
       diffWorker({ oldName: "my-app", news: { name: "my-app-2" }, output, accountId }),
@@ -142,11 +172,54 @@ describe("diffWorker", () => {
     expect(
       diffWorker({
         oldName: "my-app",
-        news: { name: "my-app", logpush: true, delete: true },
+        news: { name: "my-app", logpush: true },
         output,
         accountId,
       }),
     ).toBeUndefined();
+  });
+});
+
+describe("a Worker saved by 0.3 with the removed delete prop", () => {
+  // State from 0.3 keeps `delete` in the saved props, which the type no longer names.
+  const saved = { name: "my-app", delete: false };
+  const olds: WorkerProps = saved;
+  const news: WorkerProps = { name: "my-app" };
+
+  it("is an update that sends no PATCH, not a replacement", () => {
+    expect(diffWorker({ oldName: output.name, news, output, accountId })).toBeUndefined();
+    // The engine updates when the provider diff gives no action and the props changed.
+    expect(havePropsChanged(olds, news)).toBe(true);
+    // An empty edit body: the update sends no PATCH and only reads the Worker again.
+    expect(editBody(news)).toEqual({});
+  });
+});
+
+describe("deleteWorker", () => {
+  const workers = `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/workers`;
+  /** Code 10007, which distilled maps to `WorkerNotFound`. */
+  const workerNotFound = () => fixture("cloudflare/workers_scripts_not_found_error.json");
+
+  it("sends DELETE to the path of the Worker id", async () => {
+    const server = serve(200, { success: true, errors: [], messages: [], result: null });
+    await run(deleteWorker(output).pipe(Effect.provide(server.layer)));
+    expect(server.requests).toHaveLength(1);
+    expect(server.requests[0]?.method).toBe("DELETE");
+    expect(server.requests[0]?.url).toBe(`${workers}/${output.workerId}`);
+  });
+
+  it("succeeds when the Worker does not exist, whatever the status", async () => {
+    for (const status of [400, 404]) {
+      const server = serve(status, workerNotFound());
+      await run(deleteWorker(output).pipe(Effect.provide(server.layer)));
+      expect(server.requests).toHaveLength(1);
+    }
+  });
+
+  it("keeps other errors", async () => {
+    const server = serve(400, fixture("cloudflare/workers_create_invalid_name_error.json"));
+    const error = await failure(deleteWorker(output).pipe(Effect.provide(server.layer)));
+    expect(error.message).toContain("Invalid Worker name");
   });
 });
 

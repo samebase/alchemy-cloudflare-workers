@@ -14,7 +14,7 @@ The package adds only what the built-in `alchemy/Cloudflare` provider does not h
 
 This is a community provider, maintained by [Samebase](https://samebase.com).
 
-Status: 0.3, pinned to `alchemy@2.0.0-beta.80` and Effect 4. Alchemy ships breaking changes
+Status: 0.4, pinned to `alchemy@2.0.0-beta.80` and Effect 4. Alchemy ships breaking changes
 between betas. Upgrade this package and Alchemy together.
 
 ## Ownership rule
@@ -166,6 +166,32 @@ instance id, lowercase and at most 54 characters, such as `myapp-worker-dev-k3m7
 - The name is also the `workers.dev` hostname: `https://<name>.<account subdomain>.workers.dev`.
   A production Worker usually wants an explicit name.
 
+### Keep the Worker on destroy
+
+Destroy deletes the Worker with all of its versions and preview URLs. A stack that must keep a
+production Worker on destroy wraps the call in Alchemy's removal policy:
+
+```ts
+Effect.gen(function* () {
+  const worker = yield* WorkersBuilds.Worker("Worker", { name: "my-app" }).pipe(
+    Alchemy.RemovalPolicy.retain(),
+  );
+  // ...
+});
+```
+
+- Alchemy then does not delete the Worker. It removes the Worker from state, and the plan shows the
+  Worker as `orphaned`.
+- This also applies to an adopted Worker, because Alchemy destroys adopted and created resources in
+  the same way.
+- A replacement, such as a new `name`, then also keeps the old Worker.
+- The policy is not a prop, so the plan shows no change. The next deploy writes it to state. Deploy
+  once after you add it, before you destroy.
+- Destroy still deletes the `WorkersBuilds.Repository` and `WorkersBuilds.Secret` resources of the
+  Worker. Each deleted secret makes a new version of the Worker without that secret. `retain()`
+  applies to each resource that the piped effect declares, so you can wrap all of them in one
+  `Effect.gen` block.
+
 ## Resources
 
 ### `WorkersBuilds.Worker`
@@ -181,15 +207,15 @@ and `GET /accounts/{account_id}/workers/subdomain`.
 | `logpush`       | `false`                                              | update  |
 | `tags`          | `[]`                                                 | update  |
 | `tailConsumers` | `[]`                                                 | update  |
-| `delete`        | `false`                                              | update  |
 
 Outputs: `workerId` (the Worker tag), `name`, `url`
 (`https://<name>.<account subdomain>.workers.dev`), `accountId`.
 
 - Defaults apply on create only. An update sends only the props that you set.
-- Destroy keeps the Worker unless `delete` is `true`. Deleting a Worker deletes all of its
-  versions, deployments, and preview URLs.
-- A new explicit `name` creates a new Worker. The old Worker stays unless `delete` is `true`.
+- Destroy deletes the Worker with all of its versions, deployments, and preview URLs. A Worker that
+  is already gone is not an error. To keep the Worker, see
+  [Keep the Worker on destroy](#keep-the-worker-on-destroy).
+- A new explicit `name` creates a new Worker, and then deletes the old Worker.
 - An existing Worker with the same name is adopted only with `--adopt`. A made name is new, so
   nothing is adopted without `name`.
 

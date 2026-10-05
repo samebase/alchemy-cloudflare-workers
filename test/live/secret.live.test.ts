@@ -52,7 +52,7 @@ test.provider.skipIf(!liveEnabled)(
       /** The stack: a Worker shell, and the secret when `value` is set. */
       const declare = (value: string | undefined) =>
         Effect.gen(function* () {
-          const worker = yield* WorkersBuilds.Worker("Worker", { name, delete: true });
+          const worker = yield* WorkersBuilds.Worker("Worker", { name });
           if (value !== undefined) {
             yield* WorkersBuilds.Secret("Secret", {
               worker: worker.name,
